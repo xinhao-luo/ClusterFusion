@@ -10,12 +10,13 @@
 #define HEAD_NUM 32
 #define CLUSTER_SIZE 4
 #define BATCH_SIZE 1
-#define SEQ_LEN 128
+#define SEQ_LEN 8
+
+std::mt19937 rng(42);
+std::normal_distribution<float> norm_dist(0.0, 5.0);
 
 template <typename T>
 void fill_matrix(T* mat, int sz) {
-    std::mt19937 rng(42);
-    std::normal_distribution<float> norm_dist(0.0, 5.0);
     for (int i = 0; i < sz; i++) {
         float random_value = norm_dist(rng);
         if constexpr(std::is_same<T, __half>::value) {
@@ -42,25 +43,69 @@ inline std::vector<half> rms_norm(
   return std::move(output);
 }
 
-__global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) norm(
+__global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) 
+norm(
     half* output, 
     half* input,  
-    half* w_rms
+    half* w_rms,
+    float eps = 1e-5
 ){
     namespace cg = cooperative_groups;
     cg::grid_group grid             = cg::this_grid();
     cg::cluster_group cluster       = cg::this_cluster();
     cg::thread_block block          = cg::this_thread_block();
-    const uint32_t BATCH_SIZE_id         = blockIdx.x;
+
+    const uint32_t batch_id         = blockIdx.x;
     const uint32_t head_id          = grid.cluster_rank();
     const uint32_t cluster_block_id = cluster.block_rank();
     const uint32_t tid              = block.thread_rank();
     const uint32_t lane_id = tid % 32; // 32 per warp
     const uint32_t warp_id = tid / 32;
 
-    // TODO
+    // TODO: use DSM?
+    // shared memory in block
+    __shared__ half sum;
+    if (tid==0){
+        sum=0;
+    }
+    __syncthreads();
 
+    // FIXME: only work with the fake loop, in need of extension
+    half input_reg[8], weight_reg[8];
+    half local_sum = 0;
+    // stage 1: read and calculate element-wise
+    for (int d = tid; d < SEQ_LEN / 8; d+=block.num_threads()) { // SEQ_LEN <= 512 threads * 8
+        *(uint4*)(&input_reg[0]) = *(uint4*)(&input[batch_id * SEQ_LEN + d * 8]);
+        *(uint4*)(&weight_reg[0]) = *(uint4*)(&w_rms[batch_id * SEQ_LEN + d * 8]);
+    
+        for (int di = 0; di < 8; di++) {
+            local_sum += __hmul(input_reg[di],input_reg[di]);
+        }
+    }
+
+    // stage 2: reduction
+    #pragma unroll
+    for (int mask = 16; mask > 0; mask >>= 1) {
+        // warp shuffle
+        local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
+    }
+    if (lane_id == 0){
+        atomicAdd(&sum,local_sum);
+    }
+    __syncthreads(); // finish block reduction here
+
+    // stage 3: update element-wise
+    half rms_rcp = __float2half(1.f / (std::sqrt(__half2float(sum) / float(SEQ_LEN)) + eps));
+
+    for (int j = tid; j < SEQ_LEN / 8; j+=block.num_threads()) {
+        for (int di = 0; di < 8; di++) {
+            input_reg[di]= __hmul(input_reg[di],rms_rcp);
+            output[batch_id * SEQ_LEN + j * 8 + di] = __hmul(input_reg[di],weight_reg[di]);
+        }
+    }
+    __syncthreads();
 }
+
 
 int main(int argc, char** argv){
     half *h_input, *d_input, *h_w, *d_w;
@@ -91,7 +136,30 @@ int main(int argc, char** argv){
     // ! ===================================================
 
     half *d_output;
+    cudaMalloc(reinterpret_cast<void**>(&d_input), sizeof(half) * BATCH_SIZE * SEQ_LEN);
+    cudaMalloc(reinterpret_cast<void**>(&d_w), sizeof(half) *BATCH_SIZE * SEQ_LEN);
+    cudaMemcpy(reinterpret_cast<void*>(d_input), h_input, sizeof(half) * BATCH_SIZE * SEQ_LEN, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_w), h_w, sizeof(half) * BATCH_SIZE * SEQ_LEN, cudaMemcpyHostToDevice);
 
+    cudaMalloc(reinterpret_cast<void**>(&d_output), sizeof(half) * BATCH_SIZE * SEQ_LEN);
+    
+    /**
+     * a cluster containing CLUSTER_SIZE blocks will be used to handle one head
+     */
+    dim3 grid(BATCH_SIZE, HEAD_NUM * CLUSTER_SIZE); // 32 * 4 blocks
+    dim3 block(BLOCK_SIZE); 
+
+    norm<<<grid, block, sizeof(float)*HEAD_NUM*BATCH_SIZE>>>(
+        d_output,d_input,d_w
+    );
+    
+    half* h_output = new __half[BATCH_SIZE * SEQ_LEN]; 
+    cudaMemcpy(h_output, d_output, sizeof(half) * BATCH_SIZE * SEQ_LEN, cudaMemcpyDeviceToHost);
+
+    for(int i=0;i< BATCH_SIZE * SEQ_LEN;++i ){
+        printf("%f ", __half2float(h_output[i]));
+    }
+    printf("\n");
 
     return 0;
 }
