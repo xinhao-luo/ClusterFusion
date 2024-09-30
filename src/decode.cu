@@ -19,11 +19,14 @@
     }
 
 #define BLOCK_SIZE 512
-#define HEAD_DIM 128
-#define HEAD_NUM 32
 #define CLUSTER_SIZE 4
-#define BATCH_SIZE 1
-#define SEQ_LEN 4096
+
+#define BATCH_SIZE 1 
+#define HEAD_DIM 128    // attn head dimension
+#define HEAD_NUM 32     // attn head number
+#define FFN_HIDDEN 512      // ffn hidden dimension
+#define EMBEDDING_DIM 256   // token embedding dimension
+#define SEQ_LEN 4096        // seqence length
 
 template <typename T>
 void fill_matrix(T* mat, int sz) {
@@ -51,18 +54,56 @@ __device__ half dot(
     return res;
 }
 
+__device__ inline void rms_norm(
+    const half* input, const half* weight, half* output, 
+    int batch_size, int d, float eps = 1e-5) {
+    for (int i = 0; i < batch_size; ++i) {
+        float sum = 0.0f;
+        for (int j = 0; j < d; ++j) {
+            sum += __half2float(input[i * d + j]) * __half2float(input[i * d + j]);
+        }
+        float rms_rcp = 1.0f / (sqrtf(sum / float(d)) + eps);
+        for (int j = 0; j < d; ++j) {
+            output[i * d + j] = __float2half(__half2float(input[i * d + j]) * rms_rcp * __half2float(weight[j]));
+        }
+    }
+}
+
+__device__ inline void rope(
+    const half* input, half* output, 
+    int D, int offset,
+    float rope_scale, float rope_theta
+) {
+    for (int k = threadIdx.x; k < D; k += blockDim.x) {
+        half permuted_input = (k < D / 2) ? -input[k + D / 2] : input[k - D / 2];
+
+        float inv_freq = (offset / rope_scale) / (powf(rope_theta, float(2 * (k % (D / 2))) / float(D)));
+
+        //  q = q * cos_pos + q2 * sin_pos
+        float cos_pos = cosf(inv_freq);
+        float sin_pos = sinf(inv_freq);
+        output[k] = __float2half(cos_pos * __half2float(input[k]) + sin_pos * __half2float(permuted_input));
+    }
+}
+
 __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
-    half* output, // batch * head_num * head_dim
-    half* input,  // batch * seqlen
-    half* w_q,    // batch * seqlen * head_num * head_dim
-    half* w_k,    // batch * seqlen * head_num * head_dim
-    half* w_v,    // batch * seqlen * head_num * head_dim
-    half* w_o,    // batch * head_num * head_dim * seqlen
+    half* output, // batch * head_num * embedding_dim
+    half* input,  // batch * 1 * embedding_dim
+    half* w_q,    // head_num * embedding_dim * head_dim
+    half* w_k,    // head_num * embedding_dim * head_dim
+    half* w_v,    // head_num * embedding_dim * head_dim
+    half* w_o,    // head_num * head_dim * embedding_dim
     half* k_cache,// batch * head_num * (seqlen - 1) * head_dim
     half* v_cache,// batch * head_num * (seqlen - 1) * head_dim
-    half* ffn_1,  // batch * seqlen * seqlen
-    half* ffn_2,  // batch * seqlen * seqlen
-    half* global  // batch * seqlen  reduce 32 heads output
+    half* ffn_1,  // embedding_dim * ffn_hidden
+    half* ffn_2,  // ffn_hidden * embedding_dim
+    half* ffn_3,  // embedding_dim * ffn_hidden
+    half* global, // batch * embedding_dim  reduce 32 heads output
+    half* w_rms1, // embedding_dim
+    half* w_rms2, // embedding_dim
+    int rope_offset, // offset of RoPE starting point
+    float rope_scale,
+    float rope_theta
 )
 {
     namespace cg = cooperative_groups;
@@ -83,6 +124,10 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
         *(uint4*)(&input_shmem[d * 8]) = *(uint4*)(&input[batch_id * SEQ_LEN + d * 8]);
     }
     __syncthreads();
+
+    // *##########################
+    // todo：RMSNorm 
+    // *##########################
 
     // Compute hidden * wq
     half w_qkv_reg[8];
@@ -137,6 +182,11 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
     }
     __syncthreads();
 
+    // *##########################
+    // todo：RoPE
+
+    // *##########################
+
     // Compute hidden * wk
     for (int d = 0; d < HEAD_DIM / CLUSTER_SIZE; d+=8) {
         *(uint4*)(&input_reg[0]) = *(uint4*)(&input_shmem[tid * (SEQ_LEN / block.num_threads())]);
@@ -172,6 +222,11 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
             *(uint4*)(&local_kv[d]) = *(uint4*)(&local_sum[0]);
     }
     __syncthreads();
+
+    // *##########################
+    // todo：RoPE
+
+    // *##########################
 
     // Compute q * k^T
     extern __shared__ __align__(16) uint8_t attn_weight[];
@@ -394,6 +449,11 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
     }
     __syncthreads();
 
+    // *##########################
+    // todo：RMSNorm
+
+    // *##########################
+
     // Compute FFN1
     half w_ffn1_reg[8];
     __shared__ half local_output_reduction[16 * 8];
@@ -417,6 +477,7 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
             *(uint4*)(&local_output_reduction[warp_id * 8]) = *(uint4*)(&local_sum[0]);
         }
         __syncthreads();
+
         if (tid < 16) {
             *(uint4*)(&local_sum[d]) = *(uint4*)(&local_output_reduction[tid * 8]);
         }
@@ -426,6 +487,12 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
             *(half2*)(&local_sum[4]) += __shfl_down_sync(0xffffffff, *(half2*)(&local_sum[4]), mask);
             *(half2*)(&local_sum[6]) += __shfl_down_sync(0xffffffff, *(half2*)(&local_sum[6]), mask);
         }
+
+        // *##########################
+        // todo: use SiLU 
+
+        // *##########################
+
         if (tid == 0) {
             *(uint4*)(&local_output[d]) = *(uint4*)(&local_sum[0]);
             for (int di = 0; di < 8; di++) {
@@ -451,11 +518,13 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
 
 int main(int argc, char** argv) {
     // shared memory size per threadBlock
-    cudaFuncSetAttribute(decode, cudaFuncAttributeMaxDynamicSharedMemorySize, sizeof(float) * BATCH_SIZE * SEQ_LEN * 5);
+    cudaFuncSetAttribute(decode, cudaFuncAttributeMaxDynamicSharedMemorySize, sizeof(float) * BATCH_SIZE * EMBEDDING_DIM * 5);
     // at most 16 blocks per cluster
     cudaFuncSetAttribute(decode, cudaFuncAttributeNonPortableClusterSizeAllowed, 16);
 
-    int batch = BATCH_SIZE, seq_len = SEQ_LEN;
+    int rope_offset = 0;
+    float rope_scale = 1;
+    float rope_theta = 1e4;
     half *h_input, *d_input;
     half *h_k_cache, *d_k_cache;
     half *h_v_cache, *d_v_cache;
@@ -465,64 +534,80 @@ int main(int argc, char** argv) {
     half *h_w_o, *d_w_o;
     half *h_ffn_1, *d_ffn_1;
     half *h_ffn_2, *d_ffn_2;
-    h_input = new half[batch * seq_len];
-    h_w_q = new half[batch * HEAD_NUM * seq_len * HEAD_DIM];
-    h_w_k = new half[batch * HEAD_NUM * seq_len * HEAD_DIM];
-    h_w_v = new half[batch * HEAD_NUM * seq_len * HEAD_DIM];
-    h_w_o = new half[batch * HEAD_NUM * seq_len * HEAD_DIM];
-    h_k_cache = new half[batch * (seq_len - 1) * HEAD_DIM * HEAD_NUM];
-    h_v_cache = new half[batch * (seq_len - 1) * HEAD_DIM * HEAD_NUM];
-    h_ffn_1 = new half[batch * seq_len * seq_len];
-    h_ffn_2 = new half[batch * seq_len * seq_len];
-    fill_matrix(h_input, batch * seq_len);
-    fill_matrix(h_k_cache, batch * (seq_len - 1) * HEAD_DIM * HEAD_NUM);
-    fill_matrix(h_v_cache, batch * (seq_len - 1) * HEAD_DIM * HEAD_NUM);
-    fill_matrix(h_w_q, batch * HEAD_NUM * seq_len * HEAD_DIM);
-    fill_matrix(h_w_k, batch * HEAD_NUM * seq_len * HEAD_DIM);
-    fill_matrix(h_w_v, batch * HEAD_NUM * seq_len * HEAD_DIM);
-    fill_matrix(h_w_o, batch * HEAD_NUM * seq_len * HEAD_DIM);
-    fill_matrix(h_ffn_1, batch * seq_len * seq_len);
-    fill_matrix(h_ffn_2, batch * seq_len * seq_len);
+    half *h_ffn_3, *d_ffn_3;
+    half *h_rms_1, *d_rms_1;
+    half *h_rms_2, *d_rms_2;
+    h_input = new half[BATCH_SIZE * 1 * EMBEDDING_DIM];
+    h_w_q = new half[HEAD_NUM * EMBEDDING_DIM * HEAD_DIM];
+    h_w_k = new half[HEAD_NUM * EMBEDDING_DIM * HEAD_DIM];
+    h_w_v = new half[HEAD_NUM * EMBEDDING_DIM * HEAD_DIM];
+    h_w_o = new half[HEAD_NUM * HEAD_DIM * EMBEDDING_DIM];
+    h_k_cache = new half[BATCH_SIZE * HEAD_NUM * (SEQ_LEN - 1) * HEAD_DIM];
+    h_v_cache = new half[BATCH_SIZE * HEAD_NUM * (SEQ_LEN - 1) * HEAD_DIM];
+    h_ffn_1 = new half[EMBEDDING_DIM * FFN_HIDDEN];
+    h_ffn_2 = new half[FFN_HIDDEN * EMBEDDING_DIM];
+    h_ffn_3 = new half[EMBEDDING_DIM * FFN_HIDDEN];
+    h_rms_1 = new half[EMBEDDING_DIM];
+    h_rms_2 = new half[EMBEDDING_DIM];
 
-    cudaMalloc(reinterpret_cast<void**>(&d_input), sizeof(half) * batch * seq_len);
-    cudaMalloc(reinterpret_cast<void**>(&d_k_cache), sizeof(half) * batch * (seq_len - 1) * HEAD_DIM * HEAD_NUM);
-    cudaMalloc(reinterpret_cast<void**>(&d_v_cache), sizeof(half) * batch * (seq_len - 1) * HEAD_DIM * HEAD_NUM);
-    cudaMalloc(reinterpret_cast<void**>(&d_w_q), sizeof(half) * batch * HEAD_NUM * seq_len * HEAD_DIM);
-    cudaMalloc(reinterpret_cast<void**>(&d_w_k), sizeof(half) * batch * HEAD_NUM * seq_len * HEAD_DIM);
-    cudaMalloc(reinterpret_cast<void**>(&d_w_v), sizeof(half) * batch * HEAD_NUM * seq_len * HEAD_DIM);
-    cudaMalloc(reinterpret_cast<void**>(&d_w_o), sizeof(half) * batch * HEAD_NUM * seq_len * HEAD_DIM);
-    cudaMalloc(reinterpret_cast<void**>(&d_ffn_1), sizeof(half) * batch * seq_len * seq_len);
-    cudaMalloc(reinterpret_cast<void**>(&d_ffn_2), sizeof(half) * batch * seq_len * seq_len);
+    fill_matrix(h_input, BATCH_SIZE * 1 * EMBEDDING_DIM);
+    fill_matrix(h_w_q, HEAD_NUM * EMBEDDING_DIM * HEAD_DIM);
+    fill_matrix(h_w_k, HEAD_NUM * EMBEDDING_DIM * HEAD_DIM);
+    fill_matrix(h_w_v, HEAD_NUM * EMBEDDING_DIM * HEAD_DIM);
+    fill_matrix(h_w_o, HEAD_NUM * HEAD_DIM * EMBEDDING_DIM);
+    fill_matrix(h_k_cache, BATCH_SIZE * HEAD_NUM * (SEQ_LEN - 1) * HEAD_DIM);
+    fill_matrix(h_v_cache, BATCH_SIZE * HEAD_NUM * (SEQ_LEN - 1) * HEAD_DIM);
+    fill_matrix(h_ffn_1, EMBEDDING_DIM * FFN_HIDDEN);
+    fill_matrix(h_ffn_2, FFN_HIDDEN * EMBEDDING_DIM);
+    fill_matrix(h_ffn_3, EMBEDDING_DIM * FFN_HIDDEN);
+    fill_matrix(h_rms_1, EMBEDDING_DIM);
+    fill_matrix(h_rms_2, EMBEDDING_DIM);
 
-    cudaMemcpy(reinterpret_cast<void*>(d_input), h_input, sizeof(half) * batch * seq_len, cudaMemcpyHostToDevice);
-    cudaMemcpy(reinterpret_cast<void*>(d_k_cache), h_k_cache, sizeof(half) * batch * (seq_len - 1) * HEAD_DIM * HEAD_NUM, cudaMemcpyHostToDevice);
-    cudaMemcpy(reinterpret_cast<void*>(d_v_cache), h_v_cache, sizeof(half) * batch * (seq_len - 1) * HEAD_DIM * HEAD_NUM, cudaMemcpyHostToDevice);
-    cudaMemcpy(reinterpret_cast<void*>(d_w_q), h_w_q, sizeof(half) * batch * HEAD_NUM * seq_len * HEAD_DIM, cudaMemcpyHostToDevice);
-    cudaMemcpy(reinterpret_cast<void*>(d_w_k), h_w_k, sizeof(half) * batch * HEAD_NUM * seq_len * HEAD_DIM, cudaMemcpyHostToDevice);
-    cudaMemcpy(reinterpret_cast<void*>(d_w_v), h_w_v, sizeof(half) * batch * HEAD_NUM * seq_len * HEAD_DIM, cudaMemcpyHostToDevice);
-    cudaMemcpy(reinterpret_cast<void*>(d_w_o), h_w_o, sizeof(half) * batch * HEAD_NUM * seq_len * HEAD_DIM, cudaMemcpyHostToDevice);
-    cudaMemcpy(reinterpret_cast<void*>(d_ffn_1), h_ffn_1, sizeof(half) * batch * seq_len * seq_len, cudaMemcpyHostToDevice);
-    cudaMemcpy(reinterpret_cast<void*>(d_ffn_2), h_ffn_2, sizeof(half) * batch * seq_len * seq_len, cudaMemcpyHostToDevice);
+    cudaMalloc(reinterpret_cast<void**>(&d_input), sizeof(half) * BATCH_SIZE * 1 * EMBEDDING_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_w_q), sizeof(half) * HEAD_NUM * EMBEDDING_DIM * HEAD_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_w_k), sizeof(half) * HEAD_NUM * EMBEDDING_DIM * HEAD_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_w_v), sizeof(half) * HEAD_NUM * EMBEDDING_DIM * HEAD_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_w_o), sizeof(half) * HEAD_NUM * HEAD_DIM * EMBEDDING_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_k_cache), sizeof(half) * BATCH_SIZE * HEAD_NUM * (SEQ_LEN - 1) * HEAD_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_v_cache), sizeof(half) * BATCH_SIZE * HEAD_NUM * (SEQ_LEN - 1) * HEAD_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_ffn_1), sizeof(half) * EMBEDDING_DIM * FFN_HIDDEN);
+    cudaMalloc(reinterpret_cast<void**>(&d_ffn_2), sizeof(half) * FFN_HIDDEN * EMBEDDING_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_ffn_3), sizeof(half) * EMBEDDING_DIM * FFN_HIDDEN);
+    cudaMalloc(reinterpret_cast<void**>(&d_rms_1), sizeof(half) * EMBEDDING_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_rms_2), sizeof(half) * EMBEDDING_DIM);
+
+    cudaMemcpy(reinterpret_cast<void*>(d_input), h_input, sizeof(half) * BATCH_SIZE * 1 * EMBEDDING_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_w_q), h_w_q, sizeof(half) * HEAD_NUM * EMBEDDING_DIM * HEAD_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_w_k), h_w_k, sizeof(half) * HEAD_NUM * EMBEDDING_DIM * HEAD_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_w_v), h_w_v, sizeof(half) * HEAD_NUM * EMBEDDING_DIM * HEAD_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_w_o), h_w_o, sizeof(half) * HEAD_NUM * HEAD_DIM * EMBEDDING_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_k_cache), h_k_cache, sizeof(half) * BATCH_SIZE * HEAD_NUM * (SEQ_LEN - 1) * HEAD_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_v_cache), h_v_cache, sizeof(half) * BATCH_SIZE * HEAD_NUM * (SEQ_LEN - 1) * HEAD_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_ffn_1), h_ffn_1, sizeof(half) * EMBEDDING_DIM * FFN_HIDDEN, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_ffn_2), h_ffn_2, sizeof(half) * FFN_HIDDEN * EMBEDDING_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_ffn_3), h_ffn_3, sizeof(half) * EMBEDDING_DIM * FFN_HIDDEN, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_rms_1), h_rms_1, sizeof(half) * EMBEDDING_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_rms_2), h_rms_2, sizeof(half) * EMBEDDING_DIM, cudaMemcpyHostToDevice);
 
     half* h_output, *d_output;
-    h_output = new half[batch * HEAD_DIM * HEAD_NUM];
-    cudaMalloc(reinterpret_cast<void**>(&d_output), sizeof(half) * batch * HEAD_DIM * HEAD_NUM);
+    h_output = new half[BATCH_SIZE * HEAD_NUM * EMBEDDING_DIM];
+    cudaMalloc(reinterpret_cast<void**>(&d_output), sizeof(half) * BATCH_SIZE * HEAD_NUM * EMBEDDING_DIM);
 
-    half h_global[batch * SEQ_LEN] = {__float2half(0.0)};
+    half h_global[BATCH_SIZE * EMBEDDING_DIM] = {__float2half(0.0)};
     half *global_reduce;
-    cudaMalloc(reinterpret_cast<void**>(&global_reduce), sizeof(half) * batch * seq_len);
-    cudaMemcpy(reinterpret_cast<void*>(global_reduce), h_global, sizeof(half) * batch * seq_len, cudaMemcpyHostToDevice);
+    cudaMalloc(reinterpret_cast<void**>(&global_reduce), sizeof(half) * BATCH_SIZE * EMBEDDING_DIM);
+    cudaMemcpy(reinterpret_cast<void*>(global_reduce), h_global, sizeof(half) * BATCH_SIZE * EMBEDDING_DIM, cudaMemcpyHostToDevice);
 
-    dim3 grid(batch, HEAD_NUM * CLUSTER_SIZE); // 32 * 4
+    dim3 grid(BATCH_SIZE, HEAD_NUM * CLUSTER_SIZE); // 32 * 4
     dim3 block(BLOCK_SIZE); // 512
 
-    int wmup = 5000;
-    int test = 1000;
+    int wmup = 50;
+    int test = 10;
     cudaEvent_t st, ed;
     cudaEventCreate(&st);
     cudaEventCreate(&ed);
     for (int i = 0; i < wmup; i++) {
-        decode<<<grid, block, sizeof(float) * BATCH_SIZE * SEQ_LEN * 5>>>(
+        decode<<<grid, block, sizeof(float) * BATCH_SIZE * EMBEDDING_DIM * 5>>>(
             d_output,
             d_input,
             d_w_q,
@@ -533,12 +618,18 @@ int main(int argc, char** argv) {
             d_v_cache,
             d_ffn_1,
             d_ffn_2,
-            global_reduce
+            d_ffn_3,
+            global_reduce,
+            d_rms_1,
+            d_rms_2,
+            rope_offset,
+            rope_scale,
+            rope_theta
         );
     }
     cudaEventRecord(st);
     for (int i = 0; i < test; i++) {
-        decode<<<grid, block, sizeof(float) * BATCH_SIZE * SEQ_LEN * 5>>>(
+        decode<<<grid, block, sizeof(float) * BATCH_SIZE * EMBEDDING_DIM * 5>>>(
             d_output,
             d_input,
             d_w_q,
@@ -549,7 +640,13 @@ int main(int argc, char** argv) {
             d_v_cache,
             d_ffn_1,
             d_ffn_2,
-            global_reduce
+            d_ffn_3,
+            global_reduce,
+            d_rms_1,
+            d_rms_2,
+            rope_offset,
+            rope_scale,
+            rope_theta
         );
     }
     cudaEventRecord(ed);
@@ -557,6 +654,6 @@ int main(int argc, char** argv) {
     float ms;
     cudaEventElapsedTime(&ms, st, ed);
     std::cout << "Latency: " << (ms / (1.0 * test)) * 1e3 << " us" << std::endl;
-    cudaMemcpy(h_output, reinterpret_cast<void*>(d_output), sizeof(half) * batch * HEAD_DIM * HEAD_NUM, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_output, reinterpret_cast<void*>(d_output), sizeof(half) * BATCH_SIZE * HEAD_NUM * EMBEDDING_DIM, cudaMemcpyDeviceToHost);
     return 0;
 }

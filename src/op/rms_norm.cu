@@ -5,12 +5,16 @@
 #include <random>
 #include <stdio.h>
 
+
 #define BLOCK_SIZE 512
-#define HEAD_DIM 128
-#define HEAD_NUM 32
 #define CLUSTER_SIZE 4
-#define BATCH_SIZE 1
-#define SEQ_LEN 4096
+
+#define BATCH_SIZE 1 
+#define HEAD_DIM 128    // attn head dimension
+#define HEAD_NUM 32     // attn head number
+#define FFN_HIDDEN 512      // ffn hidden dimension
+#define EMBEDDING_DIM 256   // token embedding dimension
+#define SEQ_LEN 4096        // seqence length
 
 std::mt19937 rng(42);
 std::normal_distribution<float> norm_dist(0.0, 5.0);
@@ -28,15 +32,15 @@ void fill_matrix(T* mat, int sz) {
 
 inline std::vector<half> rms_norm(
     const half* input, const half* weight, float eps = 1e-5) {
-  std::vector<half> output(BATCH_SIZE * HEAD_DIM);
+  std::vector<half> output(BATCH_SIZE * EMBEDDING_DIM);
   for (size_t i = 0; i < BATCH_SIZE; ++i) {
     float sum = 0;
-    for (size_t j = 0; j < HEAD_DIM; ++j) {
-      sum += float(input[i * HEAD_DIM + j]) * float(input[i * HEAD_DIM + j]);
+    for (size_t j = 0; j < EMBEDDING_DIM; ++j) {
+      sum += float(input[i * EMBEDDING_DIM + j]) * float(input[i * EMBEDDING_DIM + j]);
     }
-    float rms_rcp = 1.f / (std::sqrt(sum / float(HEAD_DIM)) + eps);
-    for (size_t j = 0; j < HEAD_DIM; ++j) {
-      output[i * HEAD_DIM + j] = __float2half((float(input[i * HEAD_DIM + j]) * rms_rcp) * float(weight[j]));
+    float rms_rcp = 1.f / (std::sqrt(sum / float(EMBEDDING_DIM)) + eps);
+    for (size_t j = 0; j < EMBEDDING_DIM; ++j) {
+      output[i * EMBEDDING_DIM + j] = __float2half((float(input[i * EMBEDDING_DIM + j]) * rms_rcp) * float(weight[j]));
     }
   }
   return std::move(output);
@@ -74,9 +78,9 @@ norm(
     // FIXME: only work with the fake loop, in need of extension
     half __align__(16) input_reg[8], weight_reg[8];
     // stage 1: read and calculate element-wise
-    for (int d = tid; d < HEAD_DIM / 8; d+=block.num_threads()) { // HEAD_DIM <= 512 threads * 8
-        *(uint4*)(&input_reg[0]) = *(uint4*)(&input[batch_id * HEAD_DIM + d * 8]);
-        *(uint4*)(&weight_reg[0]) = *(uint4*)(&w_rms[batch_id * HEAD_DIM + d * 8]);
+    for (int d = tid; d < EMBEDDING_DIM / 8; d+=block.num_threads()) { // EMBEDDING_DIM <= 512 threads * 8
+        *(uint4*)(&input_reg[0]) = *(uint4*)(&input[batch_id * EMBEDDING_DIM + d * 8]);
+        *(uint4*)(&weight_reg[0]) = *(uint4*)(&w_rms[d * 8]);
     
         for (int di = 0; di < 8; di++) {
             local_sum += __half2float(input_reg[di])*__half2float(input_reg[di]);
@@ -104,12 +108,12 @@ norm(
     __syncthreads(); 
 
     // stage 3: update element-wise
-    half rms_rcp = __float2half(1.f / (std::sqrt((sum[0]) / float(HEAD_DIM)) + eps));
+    half rms_rcp = __float2half(1.f / (std::sqrt((sum[0]) / float(EMBEDDING_DIM)) + eps));
 
-    for (int j = tid; j < HEAD_DIM / 8; j+=block.num_threads()) {
+    for (int j = tid; j < EMBEDDING_DIM / 8; j+=block.num_threads()) {
         for (int di = 0; di < 8; di++) {
             input_reg[di]= __hmul(input_reg[di],(rms_rcp));
-            output[batch_id * HEAD_DIM + j * 8 + di] = __hmul(input_reg[di],weight_reg[di]);
+            output[batch_id * EMBEDDING_DIM + j * 8 + di] = __hmul(input_reg[di],weight_reg[di]);
         }
     }
     __syncthreads();
@@ -119,18 +123,18 @@ norm(
 int main(int argc, char** argv){
     half *h_input, *d_input, *h_w, *d_w;
 
-    h_input = new half[BATCH_SIZE * HEAD_DIM];
-    h_w = new half[BATCH_SIZE * HEAD_DIM];
+    h_input = new half[BATCH_SIZE * EMBEDDING_DIM];
+    h_w = new half[EMBEDDING_DIM];
 
-    fill_matrix(h_input, BATCH_SIZE * HEAD_DIM);
-    fill_matrix(h_w, BATCH_SIZE * HEAD_DIM);
+    fill_matrix(h_input, BATCH_SIZE * EMBEDDING_DIM);
+    fill_matrix(h_w, EMBEDDING_DIM);
 
     // *--------------------------------------------------
-    for(int i=0;i<BATCH_SIZE * HEAD_DIM;++i ){
+    for(int i=0;i < BATCH_SIZE * EMBEDDING_DIM;++i ){
         printf("%f ", __half2float(h_input[i]));
     }
     printf("\n");
-    for(int i=0;i<BATCH_SIZE * HEAD_DIM;++i ){
+    for(int i=0;i < EMBEDDING_DIM;++i ){
         printf("%f ", __half2float(h_w[i]));
     }
     printf("\n");
@@ -145,12 +149,12 @@ int main(int argc, char** argv){
     // ! ===================================================
 
     half *d_output;
-    cudaMalloc(reinterpret_cast<void**>(&d_input), sizeof(half) * BATCH_SIZE * HEAD_DIM);
-    cudaMalloc(reinterpret_cast<void**>(&d_w), sizeof(half) *BATCH_SIZE * HEAD_DIM);
-    cudaMemcpy(reinterpret_cast<void*>(d_input), h_input, sizeof(half) * BATCH_SIZE * HEAD_DIM, cudaMemcpyHostToDevice);
-    cudaMemcpy(reinterpret_cast<void*>(d_w), h_w, sizeof(half) * BATCH_SIZE * HEAD_DIM, cudaMemcpyHostToDevice);
+    cudaMalloc(reinterpret_cast<void**>(&d_input), sizeof(half) * BATCH_SIZE * EMBEDDING_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_w), sizeof(half) * EMBEDDING_DIM);
+    cudaMemcpy(reinterpret_cast<void*>(d_input), h_input, sizeof(half) * BATCH_SIZE * EMBEDDING_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_w), h_w, sizeof(half) * EMBEDDING_DIM, cudaMemcpyHostToDevice);
 
-    cudaMalloc(reinterpret_cast<void**>(&d_output), sizeof(half) * BATCH_SIZE * HEAD_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_output), sizeof(half) * BATCH_SIZE * EMBEDDING_DIM);
     
     /**
      * a cluster containing CLUSTER_SIZE blocks will be used to handle one head
@@ -162,10 +166,10 @@ int main(int argc, char** argv){
         d_output,d_input,d_w
     );
     
-    half* h_output = new __half[BATCH_SIZE * HEAD_DIM]; 
-    cudaMemcpy(h_output, d_output, sizeof(half) * BATCH_SIZE * HEAD_DIM, cudaMemcpyDeviceToHost);
+    half* h_output = new __half[BATCH_SIZE * EMBEDDING_DIM]; 
+    cudaMemcpy(h_output, d_output, sizeof(half) * BATCH_SIZE * EMBEDDING_DIM, cudaMemcpyDeviceToHost);
 
-    for(int i=0;i< BATCH_SIZE * HEAD_DIM;++i ){
+    for(int i=0;i< BATCH_SIZE * EMBEDDING_DIM;++i ){
         printf("%f ", __half2float(h_output[i]));
     }
     printf("\n");
