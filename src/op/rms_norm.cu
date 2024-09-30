@@ -28,15 +28,15 @@ void fill_matrix(T* mat, int sz) {
 
 inline std::vector<half> rms_norm(
     const half* input, const half* weight, float eps = 1e-5) {
-  std::vector<half> output(BATCH_SIZE * HEAD_DIM);
+  std::vector<half> output(BATCH_SIZE * SEQ_LEN);
   for (size_t i = 0; i < BATCH_SIZE; ++i) {
     float sum = 0;
-    for (size_t j = 0; j < HEAD_DIM; ++j) {
-      sum += float(input[i * HEAD_DIM + j]) * float(input[i * HEAD_DIM + j]);
+    for (size_t j = 0; j < SEQ_LEN; ++j) {
+      sum += float(input[i * SEQ_LEN + j]) * float(input[i * SEQ_LEN + j]);
     }
-    float rms_rcp = 1.f / (std::sqrt(sum / float(HEAD_DIM)) + eps);
-    for (size_t j = 0; j < HEAD_DIM; ++j) {
-      output[i * HEAD_DIM + j] = (float(input[i * HEAD_DIM + j]) * rms_rcp) * float(weight[j]);
+    float rms_rcp = 1.f / (std::sqrt(sum / float(SEQ_LEN)) + eps);
+    for (size_t j = 0; j < SEQ_LEN; ++j) {
+      output[i * SEQ_LEN + j] = __float2half((float(input[i * SEQ_LEN + j]) * rms_rcp) * float(weight[j]));
     }
   }
   return std::move(output);
