@@ -10,11 +10,10 @@
 #define HEAD_NUM 32
 #define CLUSTER_SIZE 4
 #define BATCH_SIZE 1
-#define SEQ_LEN 8
+#define SEQ_LEN 4096
 
 std::mt19937 rng(42);
 std::normal_distribution<float> norm_dist(0.0, 5.0);
-
 template <typename T>
 void fill_matrix(T* mat, int sz) {
     for (int i = 0; i < sz; i++) {
@@ -64,22 +63,23 @@ norm(
 
     // TODO: use DSM?
     // shared memory in block
-    __shared__ half sum;
-    if (tid==0){
-        sum=0;
+    __shared__ float sum[BLOCK_SIZE/32]; 
+    if (lane_id == 0){
+        sum[warp_id] = 0;
     }
+
     __syncthreads();
 
+    float local_sum = 0;
     // FIXME: only work with the fake loop, in need of extension
-    half input_reg[8], weight_reg[8];
-    half local_sum = 0;
+    half __align__(16) input_reg[8], weight_reg[8];
     // stage 1: read and calculate element-wise
     for (int d = tid; d < SEQ_LEN / 8; d+=block.num_threads()) { // SEQ_LEN <= 512 threads * 8
         *(uint4*)(&input_reg[0]) = *(uint4*)(&input[batch_id * SEQ_LEN + d * 8]);
         *(uint4*)(&weight_reg[0]) = *(uint4*)(&w_rms[batch_id * SEQ_LEN + d * 8]);
     
         for (int di = 0; di < 8; di++) {
-            local_sum += __hmul(input_reg[di],input_reg[di]);
+            local_sum += __half2float(input_reg[di])*__half2float(input_reg[di]);
         }
     }
 
@@ -89,17 +89,26 @@ norm(
         // warp shuffle
         local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
     }
+
     if (lane_id == 0){
-        atomicAdd(&sum,local_sum);
+        sum[warp_id] = local_sum;
     }
-    __syncthreads(); // finish block reduction here
+    __syncthreads(); 
+
+    if (tid==0){
+        for (int i = 1; i < BLOCK_SIZE/32; i++){
+            sum[0]+=sum[i];
+        }
+    }
+    // finish block reduction here
+    __syncthreads(); 
 
     // stage 3: update element-wise
-    half rms_rcp = __float2half(1.f / (std::sqrt(__half2float(sum) / float(SEQ_LEN)) + eps));
+    half rms_rcp = __float2half(1.f / (std::sqrt((sum[0]) / float(SEQ_LEN)) + eps));
 
     for (int j = tid; j < SEQ_LEN / 8; j+=block.num_threads()) {
         for (int di = 0; di < 8; di++) {
-            input_reg[di]= __hmul(input_reg[di],rms_rcp);
+            input_reg[di]= __hmul(input_reg[di],(rms_rcp));
             output[batch_id * SEQ_LEN + j * 8 + di] = __hmul(input_reg[di],weight_reg[di]);
         }
     }
