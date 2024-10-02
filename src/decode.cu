@@ -54,37 +54,6 @@ __device__ half dot(
     return res;
 }
 
-__device__ inline void rms_norm(
-    const half* input, const half* weight, half* output, 
-    int batch_size, int d, float eps = 1e-5) {
-    for (int i = 0; i < batch_size; ++i) {
-        float sum = 0.0f;
-        for (int j = 0; j < d; ++j) {
-            sum += __half2float(input[i * d + j]) * __half2float(input[i * d + j]);
-        }
-        float rms_rcp = 1.0f / (sqrtf(sum / float(d)) + eps);
-        for (int j = 0; j < d; ++j) {
-            output[i * d + j] = __float2half(__half2float(input[i * d + j]) * rms_rcp * __half2float(weight[j]));
-        }
-    }
-}
-
-__device__ inline void rope(
-    const half* input, half* output, 
-    int D, int offset,
-    float rope_scale, float rope_theta
-) {
-    for (int k = threadIdx.x; k < D; k += blockDim.x) {
-        half permuted_input = (k < D / 2) ? -input[k + D / 2] : input[k - D / 2];
-
-        float inv_freq = (offset / rope_scale) / (powf(rope_theta, float(2 * (k % (D / 2))) / float(D)));
-
-        //  q = q * cos_pos + q2 * sin_pos
-        float cos_pos = cosf(inv_freq);
-        float sin_pos = sinf(inv_freq);
-        output[k] = __float2half(cos_pos * __half2float(input[k]) + sin_pos * __half2float(permuted_input));
-    }
-}
 
 __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
     half* output, // batch * head_num * embedding_dim
@@ -119,7 +88,7 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
 
     // TODO: All cluster here share the same input
     // Load input [1 x SEQ_LEN] to shared memory
-    __shared__ half input_shmem[SEQ_LEN];
+    __shared__ __align__(16) half input_shmem[SEQ_LEN];
     for (int d = tid; d < SEQ_LEN / 8; d+=block.num_threads()) { // 512 threads * 8
         *(uint4*)(&input_shmem[d * 8]) = *(uint4*)(&input[batch_id * SEQ_LEN + d * 8]);
     }
@@ -130,11 +99,11 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
     // *##########################
 
     // Compute hidden * wq
-    half w_qkv_reg[8];
-    half input_reg[8];
-    __shared__ half local_qkv_reduction[16 * 8];
-    __shared__ half local_q[HEAD_DIM / CLUSTER_SIZE];
-    __shared__ half local_kv[HEAD_DIM / CLUSTER_SIZE];
+    half __align__(16) w_qkv_reg[8];
+    half __align__(16) input_reg[8];
+    __shared__ __align__(16) half local_qkv_reduction[16 * 8];
+    __shared__ __align__(16) half local_q[HEAD_DIM / CLUSTER_SIZE];
+    __shared__ __align__(16) half local_kv[HEAD_DIM / CLUSTER_SIZE];
 
     for (int d = 0; d < HEAD_DIM / CLUSTER_SIZE; d+=8) {
         // shared memory -> register
@@ -239,7 +208,7 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
     cluster.sync();
 
     // Load K cache to register
-    half kv_cache_reg[8];
+    half __align__(16) kv_cache_reg[8];
     for (int d = tid; d < SEQ_LEN; d+=block.num_threads()) {
         for (int i = 0; i < (HEAD_DIM / CLUSTER_SIZE) / 8; i++) {
             *(uint4*)(&input_reg[0]) = *(uint4*)(&local_q[i * 8]);
@@ -388,9 +357,9 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
     __syncthreads();
 
     // Compute attn_weight * v
-    half local_v_reg[8];
-    __shared__ half local_output[HEAD_DIM / CLUSTER_SIZE];
-    __shared__ half output_reduction[16 * 8];
+    half __align__(16) local_v_reg[8];
+    __shared__ __align__(16) half local_output[HEAD_DIM / CLUSTER_SIZE];
+    __shared__ __align__(16) half output_reduction[16 * 8];
     for (int d = 0; d < HEAD_DIM / CLUSTER_SIZE; d+=8) {
         *(uint4*)(&input_reg[0]) = *(uint4*)(&attn_weight_smem[tid * (SEQ_LEN / block.num_threads())]);
         half local_sum[8] = {__float2half(0.0)};
@@ -455,11 +424,11 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
     // *##########################
 
     // Compute FFN1
-    half w_ffn1_reg[8];
-    __shared__ half local_output_reduction[16 * 8];
+    half __align__(16) w_ffn1_reg[8];
+    __shared__ __align__(16) half local_output_reduction[16 * 8];
     for (int d = 0; d < HEAD_DIM / CLUSTER_SIZE; d+=8) {
         *(uint4*)(&input_reg[0]) = *(uint4*)(&input_shmem[tid * (SEQ_LEN / block.num_threads())]);
-        half local_sum[8] = {__float2half(0.0)};
+        half __align__(16) local_sum[8] = {__float2half(0.0)};
         for (int i = 0; i < SEQ_LEN / block.num_threads(); i++) {
             *(uint4*)(&w_ffn1_reg[0]) = *(uint4*)(&ffn_1[batch_id * SEQ_LEN * SEQ_LEN + head_id * HEAD_DIM * SEQ_LEN + cluster_block_id * (HEAD_DIM / CLUSTER_SIZE) + (tid * (SEQ_LEN / block.num_threads()) + i) * HEAD_DIM + d]);
             for (int di = 0; di < 8; di++) {
