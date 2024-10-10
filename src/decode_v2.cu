@@ -35,7 +35,7 @@ void fill_matrix(T* mat, int sz) {
     std::normal_distribution<float> norm_dist(0.0, 5.0);
     for (int i = 0; i < sz; i++) {
         if constexpr(std::is_same<T, half>::value) {
-            mat[i] = __float2half(0.001f);
+            mat[i] = __float2half(0.01f);
         }   
     }   
 }
@@ -102,12 +102,10 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
         for (int di = 0; di < 2; di++)
             local_sum += __half2float(input_reg[di]) * __half2float(input_reg[di]);
     }
-
     #pragma unroll
     for (int mask = 16; mask > 0; mask >>= 1) {
         local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
     }
-
     if (lane_id == 0){
         norm_reduction[warp_id] = local_sum;
     }
@@ -140,11 +138,10 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
     
     // Compute hidden @ wq
     half __align__(16) w_qkv_reg[8];
-    __shared__ __align__(16) half local_qkv_reduction[16 * 8];
+    __shared__ __align__(16) half local_reduction[16 * 8];
     __shared__ __align__(16) half local_q[HEAD_DIM];
-    __shared__ __align__(16) half local_q_buffer[HEAD_DIM];
+    __shared__ __align__(16) half local_buffer[HEAD_DIM];
     __shared__ __align__(16) half local_kv[HEAD_DIM];
-    __shared__ __align__(16) half local_kv_buffer[HEAD_DIM];
     for (int d = 0; d < HEAD_DIM; d+=8) {
         half2 __align__(16) local_sum_qkv[4] = {__float2half2_rn(0.0f)};
         for (int i = 0; i < HIDDEN_DIM / (CLUSTER_SIZE * BLOCK_SIZE); i++) {
@@ -161,11 +158,11 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
             local_sum_qkv[3] += __shfl_down_sync(0xffffffff, local_sum_qkv[3], mask);
         }
         if (lane_id == 0) {
-            *(uint4*)(&local_qkv_reduction[warp_id * 8]) = *(uint4*)(&local_sum_qkv[0]);
+            *(uint4*)(&local_reduction[warp_id * 8]) = *(uint4*)(&local_sum_qkv[0]);
         }
         __syncthreads();
         if (tid < 16) {
-            *(uint4*)(&local_sum_qkv[0]) = *(uint4*)(&local_qkv_reduction[tid * 8]);
+            *(uint4*)(&local_sum_qkv[0]) = *(uint4*)(&local_reduction[tid * 8]);
         }
         for (int mask = 8; mask > 0; mask >>= 1) {
             local_sum_qkv[0] += __shfl_down_sync(0xffffffff, local_sum_qkv[0], mask);
@@ -195,11 +192,11 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
             local_sum_qkv[3] += __shfl_down_sync(0xffffffff, local_sum_qkv[3], mask);
         }
         if (lane_id == 0) {
-            *(uint4*)(&local_qkv_reduction[warp_id * 8]) = *(uint4*)(&local_sum_qkv[0]);
+            *(uint4*)(&local_reduction[warp_id * 8]) = *(uint4*)(&local_sum_qkv[0]);
         }
         __syncthreads();
         if (tid < 16) {
-            *(uint4*)(&local_sum_qkv[0]) = *(uint4*)(&local_qkv_reduction[tid * 8]);
+            *(uint4*)(&local_sum_qkv[0]) = *(uint4*)(&local_reduction[tid * 8]);
         }
         for (int mask = 8; mask > 0; mask >>= 1) {
             local_sum_qkv[0] += __shfl_down_sync(0xffffffff, local_sum_qkv[0], mask);
@@ -257,7 +254,7 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
             uint32_t size = HEAD_DIM * sizeof(half);
             uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&barrier));
             uint32_t src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_q));
-            uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_q_buffer));
+            uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_buffer));
             uint32_t dst_cta = (cluster_block_id + i) % cluster.num_blocks();
             uint32_t neighbor_dst_addr;
             asm volatile (
@@ -294,7 +291,7 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
 
         // Add
         if (tid < HEAD_DIM / 2) {
-            half2 buffer = *(half2*)(&local_q_buffer[tid * 2]);
+            half2 buffer = *(half2*)(&local_buffer[tid * 2]);
             *(half2*)(&local_q[tid * 2]) = __hadd2(*(half2*)(&local_q[tid * 2]), buffer);
         }
         __syncthreads();
@@ -323,7 +320,7 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
             uint32_t size = HEAD_DIM * sizeof(half);
             uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&barrier));
             uint32_t src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_kv));
-            uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_kv_buffer));
+            uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_buffer));
             uint32_t dst_cta = (cluster_block_id + i) % cluster.num_blocks();
             uint32_t neighbor_dst_addr;
             asm volatile (
@@ -360,7 +357,7 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
 
         // Add
         if (tid < HEAD_DIM / 2) {
-            half2 buffer = *(half2*)(&local_kv_buffer[tid * 2]);
+            half2 buffer = *(half2*)(&local_buffer[tid * 2]);
             *(half2*)(&local_kv[tid * 2]) = __hadd2(*(half2*)(&local_kv[tid * 2]), buffer);
         }
         __syncthreads();
@@ -439,11 +436,11 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
             local_sum_qkv[3] += __shfl_down_sync(0xffffffff, local_sum_qkv[3], mask);
         }
         if (lane_id == 0) {
-            *(uint4*)(&local_qkv_reduction[warp_id * 8]) = *(uint4*)(&local_sum_qkv[0]);
+            *(uint4*)(&local_reduction[warp_id * 8]) = *(uint4*)(&local_sum_qkv[0]);
         }
         __syncthreads();
         if (tid < 16) {
-            *(uint4*)(&local_sum_qkv[0]) = *(uint4*)(&local_qkv_reduction[tid * 8]);
+            *(uint4*)(&local_sum_qkv[0]) = *(uint4*)(&local_reduction[tid * 8]);
         }
         for (int mask = 8; mask > 0; mask >>= 1) {
             local_sum_qkv[0] += __shfl_down_sync(0xffffffff, local_sum_qkv[0], mask);
@@ -458,131 +455,387 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
 
     // Compute attn_weight @ V
     half __align__(16) local_v_reg[8];
+    half __align__(16) local_input_reg[SEQ_LEN / (CLUSTER_SIZE * BLOCK_SIZE)];
     __shared__ __align__(16) half local_output[HEAD_DIM];
-    __shared__ __align__(16) half output_reduction[16 * 8];
     for (int d = 0; d < HEAD_DIM; d+=8) {
-        *(uint4*)(&input_reg[0]) = *(uint4*)(&attn_weight_smem[tid * (SEQ_LEN / block.num_threads())]);
-        half __align__(16) local_sum[8] = {__float2half(0.0)};
-        for (int i = 0; i < SEQ_LEN / block.num_threads(); i++) {
-            if (tid * (SEQ_LEN / block.num_threads()) + i == SEQ_LEN - 1)
+        *(half2*)(&local_input_reg[0]) = *(half2*)(&attn_weight[tid * SEQ_LEN / (CLUSTER_SIZE * BLOCK_SIZE)]);
+        half2 __align__(16) local_output_sum[4] = {__float2half2_rn(0.0f)};
+        for (int i = 0; i < SEQ_LEN / (CLUSTER_SIZE * BLOCK_SIZE); i++) {
+            if (cluster_block_id == CLUSTER_SIZE - 1 && tid * SEQ_LEN / (CLUSTER_SIZE * BLOCK_SIZE) + i == SEQ_LEN / CLUSTER_SIZE - 1)
                 *(uint4*)(&local_v_reg[0]) = *(uint4*)(&local_kv[d]);
             else
-                *(uint4*)(&local_v_reg[0]) = *(uint4*)(&v_cache[batch_id * HEAD_DIM * HEAD_NUM * (SEQ_LEN - 1) + head_id * HEAD_DIM * (SEQ_LEN - 1) + cluster_block_id * (HEAD_DIM / CLUSTER_SIZE) + (tid * (SEQ_LEN / block.num_threads()) + i) * HEAD_DIM + d]);
-            for (int di = 0; di < 8; di++) {
-                local_sum[di] += __hmul(input_reg[i], local_v_reg[di]);
+                *(uint4*)(&local_v_reg[0]) = *(uint4*)(&v_cache[batch_id * HEAD_DIM * HEAD_NUM * (SEQ_LEN - 1) + head_id * HEAD_DIM * (SEQ_LEN - 1) + cluster_block_id * (SEQ_LEN / CLUSTER_SIZE) * HEAD_DIM + (tid * SEQ_LEN / (CLUSTER_SIZE * BLOCK_SIZE) + i) * HEAD_DIM + d]);
+            for (int di = 0; di < 8; di+=2) {
+                local_output_sum[di / 2] += __hmul2({local_input_reg[i], local_input_reg[i]}, *(half2*)(&local_v_reg[di]));
             }
         }
         #pragma unroll
         for (int mask = 16; mask > 0; mask >>= 1) {
-            *(half2*)(&local_sum[0]) += __shfl_down_sync(0xffffffff, *(half2*)(&local_sum[0]), mask);
-            *(half2*)(&local_sum[2]) += __shfl_down_sync(0xffffffff, *(half2*)(&local_sum[2]), mask);
-            *(half2*)(&local_sum[4]) += __shfl_down_sync(0xffffffff, *(half2*)(&local_sum[4]), mask);
-            *(half2*)(&local_sum[6]) += __shfl_down_sync(0xffffffff, *(half2*)(&local_sum[6]), mask);
+            local_output_sum[0] += __shfl_down_sync(0xffffffff, local_output_sum[0], mask);
+            local_output_sum[1] += __shfl_down_sync(0xffffffff, local_output_sum[1], mask);
+            local_output_sum[2] += __shfl_down_sync(0xffffffff, local_output_sum[2], mask);
+            local_output_sum[3] += __shfl_down_sync(0xffffffff, local_output_sum[3], mask);
         }
         if (lane_id == 0) {
-            *(uint4*)(&output_reduction[warp_id * 8]) = *(uint4*)(&local_sum[0]);
+            *(uint4*)(&local_reduction[warp_id * 8]) = *(uint4*)(&local_output_sum[0]);
         }
         __syncthreads();
         if (tid < 16) {
-            *(uint4*)(&local_sum[d]) = *(uint4*)(&output_reduction[tid * 8]);
+            *(uint4*)(&local_output_sum[0]) = *(uint4*)(&local_reduction[tid * 8]);
         }
         for (int mask = 8; mask > 0; mask >>= 1) {
-            *(half2*)(&local_sum[0]) += __shfl_down_sync(0xffffffff, *(half2*)(&local_sum[0]), mask);
-            *(half2*)(&local_sum[2]) += __shfl_down_sync(0xffffffff, *(half2*)(&local_sum[2]), mask);
-            *(half2*)(&local_sum[4]) += __shfl_down_sync(0xffffffff, *(half2*)(&local_sum[4]), mask);
-            *(half2*)(&local_sum[6]) += __shfl_down_sync(0xffffffff, *(half2*)(&local_sum[6]), mask);
+            local_output_sum[0] += __shfl_down_sync(0xffffffff, local_output_sum[0], mask);
+            local_output_sum[1] += __shfl_down_sync(0xffffffff, local_output_sum[1], mask);
+            local_output_sum[2] += __shfl_down_sync(0xffffffff, local_output_sum[2], mask);
+            local_output_sum[3] += __shfl_down_sync(0xffffffff, local_output_sum[3], mask);
         }
         if (tid == 0)
-            *(uint4*)(&local_output[d]) = *(uint4*)(&local_sum[0]);
+            *(uint4*)(&local_output[d]) = *(uint4*)(&local_output_sum[0]);
     }
     __syncthreads();
 
-    // // Compute output * w_o
-    // half w_o_reg;
-    // half local_output_reg;
-    // // printf("%f \n", __half2float(global[0]));
-    // for (int i = tid; i < SEQ_LEN; i+=block.num_threads()) {
-    //     half local_sum = __float2half(0.0);
-    //     for (int j = 0; j < HEAD_DIM / CLUSTER_SIZE; j++) {
-    //         local_output_reg = local_output[j];
-    //         w_o_reg = w_o[head_id * HEAD_DIM * SEQ_LEN + cluster_block_id * (HEAD_DIM / CLUSTER_SIZE) * SEQ_LEN + i + j * SEQ_LEN];
-    //         local_sum += __hmul(local_output_reg, w_o_reg);
-    //     }
-    //     // Exists bug here
-    //     atomicAdd(&global[i], local_sum);
-    // }
+    // output reduce throught DSM
+    for (int i = 1; i < cluster.num_blocks() - 1; i++) {
+        __shared__ uint64_t barrier;
+        // Load neighbor block shmem data to this block's buffer within cluster
+        if (tid == 0) {
+            uint32_t size = HEAD_DIM * sizeof(half);
+            uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&barrier));
+            asm volatile (
+                "mbarrier.init.shared::cta.b64 [%0], %1;"
+                :
+                : "r"(bar_ptr), "r"(1)
+            );
+            asm volatile (
+                "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;"
+                :
+                : "r"(bar_ptr), "r"(size)
+            );
+        }
+        cluster.sync();
+        if (tid == 0) {
+            uint32_t size = HEAD_DIM * sizeof(half);
+            uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&barrier));
+            uint32_t src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_output));
+            uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_buffer));
+            uint32_t dst_cta = (cluster_block_id + i) % cluster.num_blocks();
+            uint32_t neighbor_dst_addr;
+            asm volatile (
+                "mapa.shared::cluster.u32 %0, %1, %2;\n"
+                : "=r"(neighbor_dst_addr)
+                : "r"(dst_addr), "r"(dst_cta)
+            );
+            uint32_t neighbor_dst_bar;
+            asm volatile (
+                "mapa.shared::cluster.u32 %0, %1, %2;\n"
+                : "=r"(neighbor_dst_bar)
+                : "r"(bar_ptr), "r"(dst_cta)
+            );
+            asm volatile (
+                "cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
+                :
+                :"r"(neighbor_dst_addr), "r"(src_addr), "r"(size), "r"(neighbor_dst_bar)
+                : "memory"
+            );
+        }
+        uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&barrier));
+        asm volatile (
+            "{\n"
+            ".reg .pred                P1;\n"
+            "LAB_WAIT:\n"
+            "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1;\n"
+            "@P1                       bra.uni DONE;\n"
+            "bra.uni                   LAB_WAIT;\n"
+            "DONE:\n"
+            "}\n"
+            :: "r"(bar_ptr),
+            "r"(0)
+        );
 
-    // // Load input to shared
-    // for (int d = tid; d < SEQ_LEN / 8; d+=block.num_threads()) {
-    //     *(uint4*)(&input_shmem[d * 8]) = *(uint4*)(&global[batch_id * SEQ_LEN + d * 8]);
-    // }
-    // __syncthreads();
+        // Add
+        if (tid < HEAD_DIM / 2) {
+            half2 buffer = *(half2*)(&local_buffer[tid * 2]);
+            *(half2*)(&local_output[tid * 2]) = __hadd2(*(half2*)(&local_output[tid * 2]), buffer);
+        }
+        __syncthreads();
+    }
 
-    // // *##########################
-    // // todo：RMSNorm
+    // Compute output @ w_o
+    half w_o_reg;
+    half local_output_reg;
+    for (int i = 0; i < HIDDEN_DIM / (CLUSTER_SIZE * BLOCK_SIZE); i++) {
+        half local_preffn_output = __float2half(0.0);
+        for (int j = 0; j < HEAD_DIM; j++) {
+            local_output_reg = local_output[j];
+            w_o_reg = w_o[batch_id * HEAD_DIM * HEAD_NUM * HIDDEN_DIM + head_id * HEAD_DIM * HIDDEN_DIM + cluster_block_id * (HIDDEN_DIM / CLUSTER_SIZE) + (tid * HIDDEN_DIM / (CLUSTER_SIZE * BLOCK_SIZE) + i) + j * HIDDEN_DIM];
+            local_preffn_output += __hmul(local_output_reg, w_o_reg);
+        }
+        // Exists bug here
+        atomicAdd(&global[batch_id * HIDDEN_DIM + cluster_block_id * (HIDDEN_DIM / CLUSTER_SIZE) + tid * HIDDEN_DIM / (CLUSTER_SIZE * BLOCK_SIZE) + i], local_preffn_output);
+    }
+    cluster.sync();
+    
+    // Fused residual and RMSNorm
+    for (int d = tid; d < BLOCK_SIZE; d+=block.num_threads()) { 
+        *(half2*)(&input_reg[0]) = __hadd2(*(half2*)(&input_shmem[batch_id * HIDDEN_DIM + d * 2]), *(half2*)(&global[batch_id * HIDDEN_DIM + d * 2]));
+        *(half2*)(&input_shmem[batch_id * HIDDEN_DIM + d * 2]) = *(half2*)(&input_reg[0]);
+        *(half2*)(&weight_reg[0]) = *(half2*)(&w_rms_attn[d * 2]);
+        for (int di = 0; di < 2; di++)
+            local_sum += __half2float(input_reg[di]) * __half2float(input_reg[di]);
+    }
+    #pragma unroll
+    for (int mask = 16; mask > 0; mask >>= 1) {
+        local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
+    }
+    if (lane_id == 0){
+        norm_reduction[warp_id] = local_sum;
+    }
+    __syncthreads(); 
+    if (tid < 16) 
+        local_sum = norm_reduction[tid];
+    #pragma unroll
+    for (int mask = 8; mask > 0; mask >>= 1) {
+        local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
+    } 
+    if (tid == 0)
+        cluster_local_sum = local_sum;
+    // Reduce through DSM
+    for (int i = 1; i < cluster.num_blocks() - 1; i++) {
+        if (tid == 0) {
+            local_sum = cluster_local_sum;
+            int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
+            float* dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);
+            atomicAdd(dst_shmem, local_sum);
+        }
+    }
+    cluster.sync();
+    rms_rcp = __float2half(1.f / (std::sqrt(cluster_local_sum / float(HIDDEN_DIM)) + eps));
+    for (int d = tid; d < BLOCK_SIZE; d+=block.num_threads()) { 
+        *(half2*)(&input_reg[0]) = __hmul2(*(half2*)(&input_reg[0]), {rms_rcp, rms_rcp});
+        *(half2*)(&input_reg[0]) = __hmul2(*(half2*)(&input_reg[0]), *(half2*)(&weight_reg[0]));
+    }
+    __syncthreads();
+    
+    // Compute gate proj
+    half __align__(16) w_ffn1_reg[8];
+    for (int d = 0; d < HEAD_DIM; d+=8) {
+        half2 __align__(16) local_predown_sum[4] = {__float2half2_rn(0.0f)};
+        for (int i = 0; i < SEQ_LEN / (CLUSTER_SIZE * BLOCK_SIZE); i++) {
+            *(uint4*)(&w_ffn1_reg[0]) = *(uint4*)(&ffn_gate[head_id * HEAD_DIM + cluster_block_id * (HIDDEN_DIM / CLUSTER_SIZE) * FFN_HIDDEN + (tid * HIDDEN_DIM / (CLUSTER_SIZE * BLOCK_SIZE) + i) * FFN_HIDDEN + d]);
+            for (int di = 0; di < 8; di+=2) {
+                local_predown_sum[di / 2] += __hmul2({input_reg[i], input_reg[i]}, *(half2*)(&w_ffn1_reg[di]));
+            }
+        }
+        #pragma unroll
+        for (int mask = 16; mask > 0; mask >>= 1) {
+            local_predown_sum[0] += __shfl_down_sync(0xffffffff, local_predown_sum[0], mask);
+            local_predown_sum[1] += __shfl_down_sync(0xffffffff, local_predown_sum[1], mask);
+            local_predown_sum[2] += __shfl_down_sync(0xffffffff, local_predown_sum[2], mask);
+            local_predown_sum[3] += __shfl_down_sync(0xffffffff, local_predown_sum[3], mask);
+        }
+        if (lane_id == 0) {
+            *(uint4*)(&local_reduction[warp_id * 8]) = *(uint4*)(&local_predown_sum[0]);
+        }
+        __syncthreads();
+        if (tid < 16) {
+            *(uint4*)(&local_predown_sum[0]) = *(uint4*)(&local_reduction[tid * 8]);
+        }
+        for (int mask = 8; mask > 0; mask >>= 1) {
+            local_predown_sum[0] += __shfl_down_sync(0xffffffff, local_predown_sum[0], mask);
+            local_predown_sum[1] += __shfl_down_sync(0xffffffff, local_predown_sum[1], mask);
+            local_predown_sum[2] += __shfl_down_sync(0xffffffff, local_predown_sum[2], mask);
+            local_predown_sum[3] += __shfl_down_sync(0xffffffff, local_predown_sum[3], mask);
+        }
+        if (tid == 0)
+            *(uint4*)(&local_output[d]) = *(uint4*)(&local_predown_sum[0]);
+    }
+    __syncthreads();
 
-    // // *##########################
+    // gate proj reduce through DSM
+    for (int i = 1; i < cluster.num_blocks() - 1; i++) {
+        __shared__ uint64_t barrier;
+        // Load neighbor block shmem data to this block's buffer within cluster
+        if (tid == 0) {
+            uint32_t size = HEAD_DIM * sizeof(half);
+            uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&barrier));
+            asm volatile (
+                "mbarrier.init.shared::cta.b64 [%0], %1;"
+                :
+                : "r"(bar_ptr), "r"(1)
+            );
+            asm volatile (
+                "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;"
+                :
+                : "r"(bar_ptr), "r"(size)
+            );
+        }
+        cluster.sync();
+        if (tid == 0) {
+            uint32_t size = HEAD_DIM * sizeof(half);
+            uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&barrier));
+            uint32_t src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_output));
+            uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_buffer));
+            uint32_t dst_cta = (cluster_block_id + i) % cluster.num_blocks();
+            uint32_t neighbor_dst_addr;
+            asm volatile (
+                "mapa.shared::cluster.u32 %0, %1, %2;\n"
+                : "=r"(neighbor_dst_addr)
+                : "r"(dst_addr), "r"(dst_cta)
+            );
+            uint32_t neighbor_dst_bar;
+            asm volatile (
+                "mapa.shared::cluster.u32 %0, %1, %2;\n"
+                : "=r"(neighbor_dst_bar)
+                : "r"(bar_ptr), "r"(dst_cta)
+            );
+            asm volatile (
+                "cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
+                :
+                :"r"(neighbor_dst_addr), "r"(src_addr), "r"(size), "r"(neighbor_dst_bar)
+                : "memory"
+            );
+        }
+        uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&barrier));
+        asm volatile (
+            "{\n"
+            ".reg .pred                P1;\n"
+            "LAB_WAIT:\n"
+            "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1;\n"
+            "@P1                       bra.uni DONE;\n"
+            "bra.uni                   LAB_WAIT;\n"
+            "DONE:\n"
+            "}\n"
+            :: "r"(bar_ptr),
+            "r"(0)
+        );
 
-    // // Compute FFN1
-    // half __align__(16) w_ffn1_reg[8];
-    // __shared__ __align__(16) half local_output_reduction[16 * 8];
-    // for (int d = 0; d < HEAD_DIM / CLUSTER_SIZE; d+=8) {
-    //     *(uint4*)(&input_reg[0]) = *(uint4*)(&input_shmem[tid * (SEQ_LEN / block.num_threads())]);
-    //     half __align__(16) local_sum[8] = {__float2half(0.0)};
-    //     for (int i = 0; i < SEQ_LEN / block.num_threads(); i++) {
-    //         *(uint4*)(&w_ffn1_reg[0]) = *(uint4*)(&ffn_1[batch_id * SEQ_LEN * SEQ_LEN + head_id * HEAD_DIM * SEQ_LEN + cluster_block_id * (HEAD_DIM / CLUSTER_SIZE) + (tid * (SEQ_LEN / block.num_threads()) + i) * HEAD_DIM + d]);
-    //         for (int di = 0; di < 8; di++) {
-    //             local_sum[di] += __hmul(input_reg[i], w_ffn1_reg[di]);
-    //         }
-    //     }
-    //     #pragma unroll
-    //     for (int mask = 16; mask > 0; mask >>= 1) {
-    //         *(half2*)(&local_sum[0]) += __shfl_down_sync(0xffffffff, *(half2*)(&local_sum[0]), mask);
-    //         *(half2*)(&local_sum[2]) += __shfl_down_sync(0xffffffff, *(half2*)(&local_sum[2]), mask);
-    //         *(half2*)(&local_sum[4]) += __shfl_down_sync(0xffffffff, *(half2*)(&local_sum[4]), mask);
-    //         *(half2*)(&local_sum[6]) += __shfl_down_sync(0xffffffff, *(half2*)(&local_sum[6]), mask);
-    //     }
-    //     if (lane_id == 0) {
-    //         *(uint4*)(&local_output_reduction[warp_id * 8]) = *(uint4*)(&local_sum[0]);
-    //     }
-    //     __syncthreads();
+        // Add
+        if (tid < HEAD_DIM / 2) {
+            half2 buffer = *(half2*)(&local_buffer[tid * 2]);
+            if (i == cluster.num_blocks() - 2) // ReLU
+                *(half2*)(&local_output[tid * 2]) = __hmax2(__hadd2(*(half2*)(&local_output[tid * 2]), buffer), __float22half2_rn({0.0f, 0.0f}));
+            else
+                *(half2*)(&local_output[tid * 2]) = __hadd2(*(half2*)(&local_output[tid * 2]), buffer);
+        }
+        __syncthreads();
+    }
 
-    //     if (tid < 16) {
-    //         *(uint4*)(&local_sum[d]) = *(uint4*)(&local_output_reduction[tid * 8]);
-    //     }
-    //     for (int mask = 8; mask > 0; mask >>= 1) {
-    //         *(half2*)(&local_sum[0]) += __shfl_down_sync(0xffffffff, *(half2*)(&local_sum[0]), mask);
-    //         *(half2*)(&local_sum[2]) += __shfl_down_sync(0xffffffff, *(half2*)(&local_sum[2]), mask);
-    //         *(half2*)(&local_sum[4]) += __shfl_down_sync(0xffffffff, *(half2*)(&local_sum[4]), mask);
-    //         *(half2*)(&local_sum[6]) += __shfl_down_sync(0xffffffff, *(half2*)(&local_sum[6]), mask);
-    //     }
+    // Compute up proj
+    __shared__ __align__(16) half local_output_up[HEAD_DIM];
+    for (int d = 0; d < HEAD_DIM; d+=8) {
+        half2 __align__(16) local_predown_sum[4] = {__float2half2_rn(0.0f)};
+        for (int i = 0; i < SEQ_LEN / (CLUSTER_SIZE * BLOCK_SIZE); i++) {
+            *(uint4*)(&w_ffn1_reg[0]) = *(uint4*)(&ffn_up[head_id * HEAD_DIM + cluster_block_id * (HIDDEN_DIM / CLUSTER_SIZE) * FFN_HIDDEN + (tid * HIDDEN_DIM / (CLUSTER_SIZE * BLOCK_SIZE) + i) * FFN_HIDDEN + d]);
+            for (int di = 0; di < 8; di+=2) {
+                local_predown_sum[di / 2] += __hmul2({input_reg[i], input_reg[i]}, *(half2*)(&w_ffn1_reg[di]));
+            }
+        }
+        #pragma unroll
+        for (int mask = 16; mask > 0; mask >>= 1) {
+            local_predown_sum[0] += __shfl_down_sync(0xffffffff, local_predown_sum[0], mask);
+            local_predown_sum[1] += __shfl_down_sync(0xffffffff, local_predown_sum[1], mask);
+            local_predown_sum[2] += __shfl_down_sync(0xffffffff, local_predown_sum[2], mask);
+            local_predown_sum[3] += __shfl_down_sync(0xffffffff, local_predown_sum[3], mask);
+        }
+        if (lane_id == 0) {
+            *(uint4*)(&local_reduction[warp_id * 8]) = *(uint4*)(&local_predown_sum[0]);
+        }
+        __syncthreads();
+        if (tid < 16) {
+            *(uint4*)(&local_predown_sum[0]) = *(uint4*)(&local_reduction[tid * 8]);
+        }
+        for (int mask = 8; mask > 0; mask >>= 1) {
+            local_predown_sum[0] += __shfl_down_sync(0xffffffff, local_predown_sum[0], mask);
+            local_predown_sum[1] += __shfl_down_sync(0xffffffff, local_predown_sum[1], mask);
+            local_predown_sum[2] += __shfl_down_sync(0xffffffff, local_predown_sum[2], mask);
+            local_predown_sum[3] += __shfl_down_sync(0xffffffff, local_predown_sum[3], mask);
+        }
+        if (tid == 0)
+            *(uint4*)(&local_output_up[d]) = *(uint4*)(&local_predown_sum[0]);
+    }
+    __syncthreads();
 
-    //     // *##########################
-    //     // todo: use SiLU 
+    // up proj reduce through DSM
+    for (int i = 1; i < cluster.num_blocks() - 1; i++) {
+        __shared__ uint64_t barrier;
+        // Load neighbor block shmem data to this block's buffer within cluster
+        if (tid == 0) {
+            uint32_t size = HEAD_DIM * sizeof(half);
+            uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&barrier));
+            asm volatile (
+                "mbarrier.init.shared::cta.b64 [%0], %1;"
+                :
+                : "r"(bar_ptr), "r"(1)
+            );
+            asm volatile (
+                "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;"
+                :
+                : "r"(bar_ptr), "r"(size)
+            );
+        }
+        cluster.sync();
+        if (tid == 0) {
+            uint32_t size = HEAD_DIM * sizeof(half);
+            uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&barrier));
+            uint32_t src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_output_up));
+            uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_buffer));
+            uint32_t dst_cta = (cluster_block_id + i) % cluster.num_blocks();
+            uint32_t neighbor_dst_addr;
+            asm volatile (
+                "mapa.shared::cluster.u32 %0, %1, %2;\n"
+                : "=r"(neighbor_dst_addr)
+                : "r"(dst_addr), "r"(dst_cta)
+            );
+            uint32_t neighbor_dst_bar;
+            asm volatile (
+                "mapa.shared::cluster.u32 %0, %1, %2;\n"
+                : "=r"(neighbor_dst_bar)
+                : "r"(bar_ptr), "r"(dst_cta)
+            );
+            asm volatile (
+                "cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
+                :
+                :"r"(neighbor_dst_addr), "r"(src_addr), "r"(size), "r"(neighbor_dst_bar)
+                : "memory"
+            );
+        }
+        uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&barrier));
+        asm volatile (
+            "{\n"
+            ".reg .pred                P1;\n"
+            "LAB_WAIT:\n"
+            "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1;\n"
+            "@P1                       bra.uni DONE;\n"
+            "bra.uni                   LAB_WAIT;\n"
+            "DONE:\n"
+            "}\n"
+            :: "r"(bar_ptr),
+            "r"(0)
+        );
 
-    //     // *##########################
+        // Add
+        if (tid < HEAD_DIM / 2) {
+            half2 buffer = *(half2*)(&local_buffer[tid * 2]);
+            *(half2*)(&local_output_up[tid * 2]) = __hadd2(*(half2*)(&local_output_up[tid * 2]), buffer);
+        }
+        __syncthreads();
+    }
 
-    //     if (tid == 0) {
-    //         *(uint4*)(&local_output[d]) = *(uint4*)(&local_sum[0]);
-    //         for (int di = 0; di < 8; di++) {
-    //             local_output[di] = __hmax(local_output[di], __float2half(0.0));
-    //         }
-    //     }
-    // }
-    // __syncthreads();
-
-    // // Compute FFN2
-    // half w_ffn2_reg;
-    // for (int i = tid; i < SEQ_LEN; i+=block.num_threads()) {
-    //     half local_sum = __float2half(0.0);
-    //     for (int j = 0; j < HEAD_DIM / CLUSTER_SIZE; j++) {
-    //         local_output_reg = local_output[j];
-    //         w_ffn2_reg = ffn_2[batch_id * SEQ_LEN * SEQ_LEN + head_id * HEAD_DIM * SEQ_LEN + cluster_block_id * (HEAD_DIM / CLUSTER_SIZE) * SEQ_LEN + i + j * SEQ_LEN];
-    //         local_sum += __hmul(local_output_reg, w_ffn2_reg);
-    //     }
-    //     // Exists bug here
-    //     atomicAdd(&output[i], local_sum);
-    // }
+    // Compute down proj and residual
+    half w_ffn2_reg;
+    half output_decode;
+    for (int i = 0; i < HIDDEN_DIM / (CLUSTER_SIZE * BLOCK_SIZE); i++) {
+        half local_ffn2_sum = __float2half(0.0);
+        for (int j = 0; j < HEAD_DIM; j++) {
+            local_output_reg = __hmul(local_output[j], local_output_up[j]);
+            w_ffn2_reg = ffn_down[head_id * HEAD_DIM * HIDDEN_DIM + cluster_block_id * (HIDDEN_DIM / CLUSTER_SIZE) + (tid * HIDDEN_DIM / (CLUSTER_SIZE * BLOCK_SIZE) + i) + j * HIDDEN_DIM];
+            local_ffn2_sum += __hmul(local_output_reg, w_ffn2_reg);
+        }
+        // Residual
+        // Exists bug here
+        output_decode = __hadd(local_ffn2_sum, input_shmem[batch_id * HIDDEN_DIM + tid * HIDDEN_DIM / (CLUSTER_SIZE * BLOCK_SIZE) + i]);
+        atomicAdd(&output[batch_id * HIDDEN_DIM + tid * HIDDEN_DIM / (CLUSTER_SIZE * BLOCK_SIZE) + i], output_decode);
+    }
 }
 
 int main(int argc, char** argv) {
