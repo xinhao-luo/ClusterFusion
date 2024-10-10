@@ -68,11 +68,6 @@ norm(
     // TODO: use DSM?
     // shared memory in block
     __shared__ float sum[BLOCK_SIZE/32]; 
-    if (lane_id == 0){
-        sum[warp_id] = 0;
-    }
-
-    __syncthreads();
 
     float local_sum = 0;
     // FIXME: only work with the fake loop, in need of extension

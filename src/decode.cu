@@ -1,4 +1,4 @@
-#include "cuda_runtime.h"
+#include "cuda_runtime.h"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        
 #include "cooperative_groups.h"
 #include "cuda_fp16.h"
 #include <iostream>
@@ -36,25 +36,23 @@ void fill_matrix(T* mat, int sz) {
     for (int i = 0; i < sz; i++) {
         if constexpr(std::is_same<T, half>::value) {
             mat[i] = __float2half(0.001f);
-        }
-    }
+        }   
+    }   
 }
 
 __device__ half dot(
     half* A,
     half* B,
-    int len
+    int len 
 )
 {
     half res = __float2half(0.0f);
     #pragma unroll
     for (int i = 0; i < len; i++) {
         res += __hmul(A[i], B[i]);
-    }
+    }   
     return res;
 }
-
-
 __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
     half* output, // batch * head_num * embedding_dim
     half* input,  // batch * 1 * embedding_dim
@@ -87,10 +85,10 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
     const uint32_t warp_id = tid / 32;
 
     // TODO: All cluster here share the same input
-    // Load input [1 x SEQ_LEN] to shared memory
-    __shared__ __align__(16) half input_shmem[SEQ_LEN];
-    for (int d = tid; d < SEQ_LEN / 8; d+=block.num_threads()) { // 512 threads * 8
-        *(uint4*)(&input_shmem[d * 8]) = *(uint4*)(&input[batch_id * SEQ_LEN + d * 8]);
+    // Load input [1 x EMBEDDING_DIM] to shared memory
+    __shared__ __align__(16) half input_shmem[EMBEDDING_DIM];
+    for (int d = tid; d < EMBEDDING_DIM / 8; d+=block.num_threads()) { // 512 threads * 8
+        *(uint4*)(&input_shmem[d * 8]) = *(uint4*)(&input[batch_id * EMBEDDING_DIM + d * 8]);
     }
     __syncthreads();
 
@@ -108,7 +106,7 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
     for (int d = 0; d < HEAD_DIM / CLUSTER_SIZE; d+=8) {
         // shared memory -> register
         *(uint4*)(&input_reg[0]) = *(uint4*)(&input_shmem[tid * (SEQ_LEN / block.num_threads())]);
-        half local_sum[8] = {__float2half(0.0)};
+        half __align__(16) local_sum[8] = {__float2half(0.0)};
         for (int i = 0; i < SEQ_LEN / block.num_threads(); i++) {
             *(uint4*)(&w_qkv_reg[0]) = *(uint4*)(&w_q[
                     batch_id * SEQ_LEN * HEAD_DIM * HEAD_NUM
@@ -159,7 +157,7 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
     // Compute hidden * wk
     for (int d = 0; d < HEAD_DIM / CLUSTER_SIZE; d+=8) {
         *(uint4*)(&input_reg[0]) = *(uint4*)(&input_shmem[tid * (SEQ_LEN / block.num_threads())]);
-        half local_sum[8] = {__float2half(0.0)};
+        half __align__(16) local_sum[8] = {__float2half(0.0)};
         for (int i = 0; i < SEQ_LEN / block.num_threads(); i++) {
             *(uint4*)(&w_qkv_reg[0]) = *(uint4*)(&w_k[batch_id * SEQ_LEN * HEAD_DIM * HEAD_NUM + head_id * HEAD_DIM * SEQ_LEN + cluster_block_id * (HEAD_DIM / CLUSTER_SIZE) + (tid * (SEQ_LEN / block.num_threads()) + i) * HEAD_DIM + d]);
             // TODO: Use half2 __hmul2 but exist bug
@@ -323,7 +321,7 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
     // Compute hidden * w_v
     for (int d = 0; d < HEAD_DIM / CLUSTER_SIZE; d+=8) {
         *(uint4*)(&input_reg[0]) = *(uint4*)(&input_shmem[tid * (SEQ_LEN / block.num_threads())]);
-        half local_sum[8] = {__float2half(0.0)};
+        half __align__(16) local_sum[8] = {__float2half(0.0)};
         for (int i = 0; i < SEQ_LEN / block.num_threads(); i++) {
             *(uint4*)(&w_qkv_reg[0]) = *(uint4*)(&w_v[batch_id * SEQ_LEN * HEAD_DIM * HEAD_NUM + head_id * HEAD_DIM * SEQ_LEN + cluster_block_id * (HEAD_DIM / CLUSTER_SIZE) + (tid * (SEQ_LEN / block.num_threads()) + i) * HEAD_DIM + d]);
             // TODO: Use half2 __hmul2 but exist bug
@@ -362,7 +360,7 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
     __shared__ __align__(16) half output_reduction[16 * 8];
     for (int d = 0; d < HEAD_DIM / CLUSTER_SIZE; d+=8) {
         *(uint4*)(&input_reg[0]) = *(uint4*)(&attn_weight_smem[tid * (SEQ_LEN / block.num_threads())]);
-        half local_sum[8] = {__float2half(0.0)};
+        half __align__(16) local_sum[8] = {__float2half(0.0)};
         for (int i = 0; i < SEQ_LEN / block.num_threads(); i++) {
             if (tid * (SEQ_LEN / block.num_threads()) + i == SEQ_LEN - 1)
                 *(uint4*)(&local_v_reg[0]) = *(uint4*)(&local_kv[d]);
