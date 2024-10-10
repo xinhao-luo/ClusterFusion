@@ -132,7 +132,7 @@ __global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) decode(
     cluster.sync();
     local_sum = cluster_local_sum;
     float eps = 1e-5;
-    half rms_rcp = __float2half(1.f / (std::sqrt(local_sum / float(1024.f)) + eps));
+    half rms_rcp = __float2half(1.f / (std::sqrt(local_sum / float(HIDDEN_DIM)) + eps));
     for (int d = tid; d < HIDDEN_DIM / CLUSTER_SIZE / 2; d+=block.num_threads()) { 
         *(half2*)(&input_reg[0]) = __hmul2(*(half2*)(&input_reg[0]), {rms_rcp, rms_rcp});
         *(half2*)(&input_shmem[d * 2]) = __hmul2(*(half2*)(&input_reg[0]), *(half2*)(&weight_reg[0]));
