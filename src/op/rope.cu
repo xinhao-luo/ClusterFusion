@@ -35,10 +35,10 @@ inline std::vector<half> rope_cpu(
     int encode_point_offset,
     float rope_scale, float rope_theta
 ) {
-    int D = dim * HEAD_DIM;
-    std::vector<half> rst(D * BATCH_SIZE);
+    int D = dim;
+    std::vector<half> rst(HEAD_NUM * BATCH_SIZE * D);
 
-    for (int i = 0; i < BATCH_SIZE; ++i) {
+    for (int i = 0; i < HEAD_NUM * BATCH_SIZE; ++i) {
         std::vector<float> permuted_input(D);
 
         for (int k = 0; k < D; ++k) {
@@ -85,12 +85,12 @@ int main(int argc, char** argv){
     int encode_point_offset = 0;
     float rope_scale = 1;
     float rope_theta = 500000;
-    h_input = new half[BATCH_SIZE * EMBEDDING_DIM * HEAD_DIM];
+    h_input = new half[BATCH_SIZE * HEAD_NUM * HEAD_DIM];
 
-    fill_matrix(h_input, BATCH_SIZE * EMBEDDING_DIM * HEAD_DIM);
+    fill_matrix(h_input, BATCH_SIZE * HEAD_NUM * HEAD_DIM);
 
     // *--------------------------------------------------
-    for(int i = 0;i < BATCH_SIZE * EMBEDDING_DIM * HEAD_DIM; ++i){
+    for(int i = 0;i < BATCH_SIZE * HEAD_NUM * HEAD_DIM; ++i){
         printf("%f ", __half2float(h_input[i]));
     }
     printf("\n");
@@ -98,7 +98,7 @@ int main(int argc, char** argv){
 
     // ! CPU version
     // ! ===================================================
-    std::vector<half> output = rope_cpu(h_input, EMBEDDING_DIM, encode_point_offset,rope_scale,rope_theta);
+    std::vector<half> output = rope_cpu(h_input, HEAD_DIM, encode_point_offset,rope_scale,rope_theta);
     for (int i = 0; i < output.size(); ++i) {
             std::cout << __half2float(output[i]) << " ";
     }
