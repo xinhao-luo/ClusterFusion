@@ -4,27 +4,31 @@
 #include <iostream>
 #include <random>
 #include <stdio.h>
+namespace cg = cooperative_groups;
 
-#define BLOCK_SIZE 512
-#define CLUSTER_SIZE 4
+#define BLOCK_SIZE 256
+#define COOPERATE_BLOCK_NUM 32 // number of blocks working on a request (>HEAD_NUM)
 
 #define BATCH_SIZE 2
-#define HEAD_DIM 2    // attn head dimension
-#define HEAD_NUM 32     // attn head number
-#define FFN_HIDDEN 512      // ffn hidden dimension
-#define EMBEDDING_DIM 256   // token embedding dimension
-#define SEQ_LEN 8        // seqence length
+#define HEAD_DIM 32        // attn head dimension
+#define HEAD_NUM 2         // attn head number
+#define FFN_HIDDEN 4096     // ffn hidden dimension
+#define EMBEDDING_DIM 16  // token embedding dimension
+#define SEQ_LEN 4096        // sequence length
+#define FL_DEC_SPLIT 256
 
 std::mt19937 rng(42);
-std::normal_distribution<float> norm_dist(0.0, 5.0);
+std::normal_distribution<float> norm_dist(0.0, 1.0);
 
-void fill_matrix(half* mat, int sz) {
+template<typename T>
+void fill_matrix(T *mat, int sz) {
     for (int i = 0; i < sz; i++) {
         float random_value = norm_dist(rng);
-        if constexpr(std::is_same<half, __half>::value) {
+        if constexpr(std::is_same<T, __half>::value)
+        {
             mat[i] = __float2half(random_value); // convert needed
         } else {
-            mat[i] = random_value; 
+            mat[i] = random_value;
         }
     }
 }
@@ -53,42 +57,57 @@ inline std::vector<half> rope_cpu(
             rst[D * i + k] = __float2half(cos * __half2float(input[D * i + k]) + sin * permuted_input[k]);
         }
     }
-
     return std::move(rst);
 }
 
-__global__ void __cluster_dims__(1, CLUSTER_SIZE, 1) 
-rope(
-    half* output,   // [BATCH_SIZE x dim x HEAD_DIM]
-    half* input,  
-    int dim,
-    int encode_point_offset,
+__global__ void rope(
+    half *output, half *input,
+    int pos_offset,
     float rope_scale, float rope_theta
-){
-    namespace cg = cooperative_groups;
-    cg::grid_group grid             = cg::this_grid();
-    cg::cluster_group cluster       = cg::this_cluster();
-    cg::thread_block block          = cg::this_thread_block();
+) {
+    const uint32_t batch_idx = blockIdx.x;
+    const uint32_t head_idx = blockIdx.y;
+    const uint32_t cooperate_idx = blockIdx.z;
+    const uint32_t tid = cg::this_thread_block().thread_rank();
+    int d = BLOCK_SIZE * cooperate_idx + tid;
 
-    const uint32_t batch_id         = blockIdx.x;
-    const uint32_t head_id          = grid.cluster_rank();
-    const uint32_t cluster_block_id = cluster.block_rank();
-    const uint32_t tid              = block.thread_rank();
-    const uint32_t lane_id = tid % 32; // 32 per warp
-    const uint32_t warp_id = tid / 32;
-    
+    __align__(16)
+    half input_reg[8], permuted_input_reg[8], roped_output_reg[8];
+    if (d < HEAD_DIM / 8) {
+        *(uint4 * )(&input_reg[0]) = *(uint4 * )(&input[batch_idx * HEAD_NUM * HEAD_DIM + head_idx * HEAD_DIM + d * 8]);
+        int permuted_idx = d * 8 >= HEAD_DIM / 2 ? (d * 8 - HEAD_DIM / 2) : (d * 8 + HEAD_DIM / 2);
+        *(uint4 * )(&permuted_input_reg[0]) = *(uint4 * )(
+                &input[batch_idx * HEAD_NUM * HEAD_DIM + head_idx * HEAD_DIM + permuted_idx]
+        );
+        for (int k = 0; k < 8; ++k) {
+            half permuted = d * 8 >= HEAD_DIM / 2 ? permuted_input_reg[k] : -permuted_input_reg[k];
+            int idx = d * 8 + k;
+            float inv_freq =
+                    (pos_offset / rope_scale) /
+                    (std::pow(rope_theta, float(2 * (idx % (HEAD_DIM / 2))) / float(HEAD_DIM)));
+            float cos = std::cos(inv_freq);
+            float sin = std::sin(inv_freq);
+            roped_output_reg[k] = __float2half(
+                    cos * __half2float(input_reg[k]) + sin * __half2float(permuted)
+            );
+        }
+        *(uint4 * )(&output[batch_idx * HEAD_NUM * HEAD_DIM + head_idx * HEAD_DIM + d * 8])
+                = *(uint4 * )(roped_output_reg);
+    }
 }
 
 
 int main(int argc, char** argv){
     half *h_input, *d_input;
-    int encode_point_offset = 0;
+    int encode_point_offset = SEQ_LEN;
     float rope_scale = 1;
     float rope_theta = 500000;
     h_input = new half[BATCH_SIZE * HEAD_NUM * HEAD_DIM];
 
     fill_matrix(h_input, BATCH_SIZE * HEAD_NUM * HEAD_DIM);
-
+    cudaMalloc(reinterpret_cast<void **>(&d_input), sizeof(half) * BATCH_SIZE * HEAD_NUM * HEAD_DIM);
+    cudaMemcpy(reinterpret_cast<void *>(d_input), h_input, sizeof(half) * BATCH_SIZE * HEAD_NUM * HEAD_DIM,
+    cudaMemcpyHostToDevice);
     // *--------------------------------------------------
     for(int i = 0;i < BATCH_SIZE * HEAD_NUM * HEAD_DIM; ++i){
         printf("%f ", __half2float(h_input[i]));
@@ -105,6 +124,24 @@ int main(int argc, char** argv){
     printf("\n");
     // ! ===================================================
 
+    half h_output[ BATCH_SIZE * HEAD_NUM * HEAD_DIM] = {__float2half(0.0)};
+    half *d_output;
+    cudaMalloc(reinterpret_cast<void **>(&d_output), sizeof(half) * BATCH_SIZE * HEAD_NUM * HEAD_DIM);
+    cudaMemcpy(reinterpret_cast<void *>(d_output), h_output,
+    sizeof(half) * BATCH_SIZE * HEAD_NUM * HEAD_DIM, cudaMemcpyHostToDevice);
+    void *kernelArgs[] = {
+        &d_output, &d_input, 
+        &encode_point_offset, &rope_scale, &rope_theta
+    };
+    dim3 grid(BATCH_SIZE, HEAD_NUM, COOPERATE_BLOCK_NUM / HEAD_NUM);
+    dim3 block(BLOCK_SIZE);
+    cudaLaunchCooperativeKernel((void *) rope, grid, block, kernelArgs);
 
+    cudaMemcpy(h_output, reinterpret_cast<void *>(d_output), sizeof(half) * BATCH_SIZE * HEAD_NUM * HEAD_DIM,
+               cudaMemcpyDeviceToHost);
+    
+    for (int i = 0; i < BATCH_SIZE * HEAD_NUM * HEAD_DIM; ++i) {
+        std::cout << __half2float(h_output[i]) << " ";
+    }
     return 0;
 }
