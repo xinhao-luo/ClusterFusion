@@ -568,6 +568,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     cluster_local_sum = 0.0;
     for (int d = tid * 2; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 2) { 
         *(half2*)(&reg_input_norm[0]) = __hadd2(*(half2*)(&input_shmem[d]), *(half2*)(&global_reduce[cluster_block_id * DIM_PER_BLOCK + d]));
+        *(half2*)(&input_shmem[d]) = *(half2*)(&reg_input_norm[0]);
         for (int di = 0; di < 2; di++)
             local_sum += __half2float(reg_input_norm[di] * reg_input_norm[di]);
     }
@@ -601,7 +602,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     }
     rms_rcp = __float2half(1.f / (std::sqrt(cluster_local_sum / float(HIDDEN_DIM)) + eps));
     for (int d = tid * 2; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 2) { 
-        *(half2*)(&reg_input_norm[0]) = __hadd2(*(half2*)(&input_shmem[d]), *(half2*)(&global_reduce[d]));
+        *(half2*)(&reg_input_norm[0]) = *(half2*)(&input_shmem[d]);
         *(half2*)(&reg_input_norm[0]) = __hmul2(*(half2*)(&reg_input_norm[0]), {rms_rcp, rms_rcp});
         *(half2*)(&reg_weight_norm[0]) = *(half2*)(&w_rms_attn[d]);
         *(half2*)(&input_shmem[d]) = __hmul2(*(half2*)(&reg_input_norm[0]), *(half2*)(&reg_weight_norm[0]));
@@ -890,8 +891,8 @@ int main(int argc, char** argv) {
     dim3 grid(HEAD_NUM * CLUSTER_SIZE); 
     dim3 block(BLOCK_SIZE);
 
-    int wmup = 500;
-    int test = 10;
+    int wmup = 1000;
+    int test = 20;
     cudaEvent_t st, ed;
     cudaEventCreate(&st);
     cudaEventCreate(&ed);
