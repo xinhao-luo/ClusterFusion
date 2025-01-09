@@ -5,7 +5,7 @@
 #include <random>
 #include <stdio.h>
 
-// CUDA_VISIBLE_DEVICES=1 nvcc --generate-code=arch=compute_90a,code=sm_90a -std=c++17 -lcuda decode_v5.cu -o test && ./test
+// nvcc --generate-code=arch=compute_90a,code=sm_90a -std=c++17 -lcuda decode_v5.cu -o test && ./test
 
 #define HEAD_DIM 128    // attn head dimension
 #define HEAD_NUM 32     // attn head number
@@ -13,14 +13,14 @@
 #define HIDDEN_DIM 4096 // token embedding dimension
 #define SEQ_LEN 4096    // sequence length
 
-#define NUM_WARPS 8
+#define NUM_WARPS 16
 #define WARP_SIZE 32
-#define BLOCK_SIZE (NUM_WARPS * WARP_SIZE) // 256
+#define BLOCK_SIZE (NUM_WARPS * WARP_SIZE) // 512
 #define CLUSTER_SIZE 4
 #define NUM_PER_THREAD 8
-#define NUM_ROW_PER_WARP (HEAD_DIM / NUM_WARPS) // 16
-#define NUM_THREAD_PER_ROW (WARP_SIZE / NUM_ROW_PER_WARP) // 2
-#define NUM_PER_ROW (NUM_PER_THREAD * NUM_THREAD_PER_ROW) // 16
+#define NUM_ROW_PER_WARP (HEAD_DIM / NUM_WARPS) // 8
+#define NUM_THREAD_PER_ROW (WARP_SIZE / NUM_ROW_PER_WARP) // 4
+#define NUM_PER_ROW (NUM_PER_THREAD * NUM_THREAD_PER_ROW) // 32
 #define DIM_PER_BLOCK (HIDDEN_DIM / CLUSTER_SIZE) // 
 #define KV_DIM_PER_BLOCK (SEQ_LEN / CLUSTER_SIZE) // 
 #define NUM_ROW_PER_WARP_2 (KV_DIM_PER_BLOCK / NUM_WARPS) // 128
@@ -69,13 +69,13 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     // Load input [1 x HIDDEN_DIM / CLUSTR_SIZE] to shared memory
     __shared__ __align__(16) half input_shmem[DIM_PER_BLOCK];
     #pragma unroll
-    for (int i = tid; i < DIM_PER_BLOCK; i+=BLOCK_SIZE) {
-        input_shmem[i] = input[cluster_block_id * DIM_PER_BLOCK + i];
+    for (int i = tid * 2; i < DIM_PER_BLOCK; i+=BLOCK_SIZE * 2) {
+        *(half2*)(&input_shmem[i]) = *(half2*)(&input[cluster_block_id * DIM_PER_BLOCK + i]);
     }
     block.sync();
 
     // RMSNorm
-    __shared__ float norm_reduction[16];
+    __shared__ float norm_reduction[NUM_WARPS];
     float local_sum = 0;
     __shared__ float cluster_local_sum;
     half __align__(16) reg_input_norm[2], reg_weight_norm[2];
@@ -92,10 +92,10 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         norm_reduction[warp_id] = local_sum;
     }
     block.sync(); 
-    if (tid < 8) 
+    if (tid < NUM_WARPS) 
         local_sum = norm_reduction[tid];
     #pragma unroll
-    for (int mask = 4; mask > 0; mask >>= 1) {
+    for (int mask = NUM_WARPS / 2; mask > 0; mask >>= 1) {
         local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
     } 
     if (tid == 0)
@@ -348,7 +348,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         attn_weight[i] = tmp;
         local_scale += __half2float(tmp);
     }
-    __shared__ float local_attn_weight_reduction[16];
+    __shared__ float local_attn_weight_reduction[NUM_WARPS];
     #pragma unroll
     for (int mask = 16; mask > 0; mask >>= 1) {
         local_scale += __shfl_down_sync(0xffffffff, local_scale, mask);
@@ -357,11 +357,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         local_attn_weight_reduction[warp_id] = local_scale;
     }
     block.sync();
-    if (tid < 8) {
+    if (tid < NUM_WARPS) {
         local_scale = local_attn_weight_reduction[tid];
     }
     #pragma unroll
-    for (int mask = 4; mask > 0; mask >>= 1) {
+    for (int mask = NUM_WARPS / 2; mask > 0; mask >>= 1) {
         local_scale += __shfl_down_sync(0xffffffff, local_scale, mask);
     }
     if(tid == 0) {
@@ -580,11 +580,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         norm_reduction[warp_id] = local_sum;
     }
     block.sync(); 
-    if (tid < 8){
+    if (tid < NUM_WARPS){
         local_sum = norm_reduction[tid];
     }
     #pragma unroll
-    for (int mask = 4; mask > 0; mask >>= 1) {
+    for (int mask = NUM_WARPS / 2; mask > 0; mask >>= 1) {
         local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
     } 
     if (tid == 0)
@@ -883,19 +883,14 @@ int main(int argc, char** argv) {
     h_output = new half[1 * HIDDEN_DIM];
     cudaMalloc(reinterpret_cast<void**>(&d_output), sizeof(half) * 1 * HIDDEN_DIM);
     
-    half h_global[HIDDEN_DIM] = {__float2half(0.0)};
     half *global_reduce;
     cudaMalloc(reinterpret_cast<void**>(&global_reduce), sizeof(half) * HIDDEN_DIM);
-    cudaMemcpy(reinterpret_cast<void*>(global_reduce), h_global, sizeof(half) * HIDDEN_DIM, cudaMemcpyHostToDevice);
 
     dim3 grid(HEAD_NUM * CLUSTER_SIZE); 
     dim3 block(BLOCK_SIZE);
 
-    int wmup = 1000;
-    int test = 20;
-    cudaEvent_t st, ed;
-    cudaEventCreate(&st);
-    cudaEventCreate(&ed);
+    int wmup = 100;
+    int test = 100;
     for (int i = 0; i < wmup; i++) {
         single_decode<<<grid, block>>>(
             d_output,
@@ -916,9 +911,13 @@ int main(int argc, char** argv) {
             d_sin
         );
     }
-    // cudaEventRecord(st);
+    cudaDeviceSynchronize();
+
+    cudaEvent_t st, ed;
+    cudaEventCreate(&st);
+    cudaEventCreate(&ed);
+    cudaEventRecord(st);
     for (int i = 0; i < test; i++) {
-        cudaEventRecord(st);
         single_decode<<<grid, block>>>(
             d_output,
             d_input,
@@ -937,12 +936,12 @@ int main(int argc, char** argv) {
             d_cos,
             d_sin
         );
-        cudaEventRecord(ed);
-        cudaEventSynchronize(ed);
-        float ms;
-        cudaEventElapsedTime(&ms, st, ed);
-        std::cout << "Latency: " << ms * 1e3 << " us" << std::endl;
     }
+    cudaEventRecord(ed);
+    cudaEventSynchronize(ed);
+    float ms;
+    cudaEventElapsedTime(&ms, st, ed);
+    std::cout << "Latency: " << ms / test * 1e3 << " us" << std::endl;
     cudaMemcpy(h_output, reinterpret_cast<void*>(d_output), sizeof(half) * 1 * HIDDEN_DIM, cudaMemcpyDeviceToHost);
     return 0;
 }
