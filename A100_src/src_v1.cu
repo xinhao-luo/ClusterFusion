@@ -32,15 +32,14 @@ namespace cg = cooperative_groups;
 #define BATCH_SIZE 1
 #define HEAD_DIM 128   // attn head dimension
 #define HEAD_NUM 32      // attn head number
-#define SMALL_COOPERATE_BLOCK_NUM (COOPERATE_BLOCK_NUM/HEAD_NUM) // 1
 
 #define FFN_HIDDEN 4096     // ffn hidden dimension
 #define EMBEDDING_DIM 4096  // token embedding dimension
 #define SEQ_LEN 4096        // sequence length
-#define ATTN_SPLIT 1024     // 8 * 256, ATTN_SPLIT <= SEQ_LEN
+#define ATTN_SPLIT 8*BLOCK_SIZE // 8 * 256, ATTN_SPLIT <= SEQ_LEN
 
 std::mt19937 rng(42);
-std::normal_distribution<float> norm_dist(0.0, 1.0);
+std::normal_distribution<float> norm_dist(0.0, 0.5);
 
 template<typename T>
 void fill_matrix(T *mat, int sz) {
@@ -48,7 +47,7 @@ void fill_matrix(T *mat, int sz) {
         float random_value;
         do {
             random_value = norm_dist(rng);
-        } while (random_value < -1 || random_value > 1);
+        } while (random_value < -0.1 || random_value > 0.1);
         if constexpr(std::is_same<T, __half>::value)
         {
             mat[i] = __float2half(random_value); // convert needed
@@ -57,7 +56,6 @@ void fill_matrix(T *mat, int sz) {
         }
     }
 }
-
 __device__ half dot(
         half *A,
         half *B,
@@ -108,7 +106,7 @@ __global__ void decode(
         float rope_scale,
         float rope_theta,
         float sm_scale,
-        half *global_reduction // batch * head_num * (SMALL_COOPERATE_BLOCK_NUM * head_dim)
+        half *global_reduction // batch * head_num * embedding_dim
 ) {
     float eps = 1e-5;
 
@@ -156,6 +154,7 @@ __global__ void decode(
         }
         block_reduce_float[0] = __float2half(1.f / (std::sqrt(thread_sum / float(EMBEDDING_DIM))) + eps);
     }
+    __syncthreads();
 
     half rms_rcp = block_reduce_float[0];
     *(uint4 * )(&weight_reg[0]) = *(uint4 * )(&w_rms1[tid * 16]);
@@ -264,32 +263,30 @@ __global__ void decode(
     // #------------------------------------------------------------------------
     // load q from shared memory to local
     __align__(16) half local_head_dim[HEAD_DIM];
-    for (int i = 0; i< HEAD_DIM / 8; ++i){
+    for (int i = 0; i< HEAD_DIM / 8; ++i) {
         *(uint4 * )(&local_head_dim[8 * i]) = *(uint4 * )(&shared_HEAD_DIM0[8 * i]);
     }
     if (lane_id == 0) {
         block_reduce_float[warp_id] = 0;
     }
     float prev_l = 0, current_l;
-    // prev o
-    #pragma unroll
-    for (int i = 0; i < 16; ++i) {
-        embedding_reg[i] = __float2half(0.0f);
-    }
+    float prev_m = 0, current_m;
+    // prev o: embedding_reg
     __align__(16) half local_attn_score[ATTN_SPLIT / 32];
     __align__(16) half local_attn[16];
-    for (int iter = tid; iter < SEQ_LEN; iter += ATTN_SPLIT) {
+    for (int iter = tid; iter < SEQ_LEN / 8; iter += BLOCK_SIZE) {
         // attention score
-        float exp_scale = 0;
-        #pragma unroll
-        for (int k = 0; k < 8; ++k){
+        float max_score = 0;
+        for (int dj = 0; dj < 8; ++dj) {
+            int line_id = iter * 8 + dj;
             float score = 0;
+            #pragma unroll
             for (int i = 0; i < HEAD_DIM / 8; ++i) {
-                if (iter == SEQ_LEN - 1){
+                if (line_id == SEQ_LEN - 1){
                     *(uint4 * )(&weight_reg[0]) = *(uint4 * )(&shared_HEAD_DIM1[8 * i]);
                 } else {
                     *(uint4 * )(&weight_reg[0]) = *(uint4 * )(&k_cache[
-                        batch_idx * HEAD_NUM * SEQ_LEN * HEAD_DIM + head_idx * SEQ_LEN * HEAD_DIM + iter * HEAD_DIM + i * 8
+                        batch_idx * HEAD_NUM * SEQ_LEN * HEAD_DIM + head_idx * SEQ_LEN * HEAD_DIM + line_id * HEAD_DIM + i * 8
                     ]);
                 }
                 #pragma unroll
@@ -297,56 +294,83 @@ __global__ void decode(
                     score += __half2float(local_head_dim[i * 8 + di]) * __half2float(weight_reg[di]);
                 }
             }
-            float exp_ = exp(score / sm_scale);
-            block_reduce_half[tid * 8 + k] = __float2half(exp_);
-            exp_scale += exp_; // l
+            local_attn[dj] = __float2half(score/sm_scale);
+            max_score = max(max_score,score);
         }
-        // warp level reduce
+        *(uint4 * )(&block_reduce_half[tid * 8]) = *(uint4 * )(&local_attn[0]);
+        // rowmax warp level reduce
         #pragma unroll
         for (int mask = 16; mask > 0; mask >>= 1) {
-            exp_scale += __shfl_down_sync(0xffffffff, exp_scale, mask);
+            max_score = max(max_score, __shfl_down_sync(0xffffffff, max_score, mask));
         }
         if (lane_id == 0) {
-            block_reduce_float[warp_id] += exp_scale;
+            block_reduce_float[warp_id] = max_score;
         }
-        // load score
-        #pragma unroll
-        for (int i = 0; i < ATTN_SPLIT / 256; ++i){
-            *(uint4 * )(&local_attn_score[8 * i]) = *(uint4 * )(&block_reduce_half[lane_id * 32 + i * 8]);
-        }
-        current_l = prev_l;
-        *(uint4 * )(&local_float[0]) = *(uint4 * )(&block_reduce_half[0]);
+        __syncthreads();
+        // rowmax
+        *(uint4 * )(&local_float[0]) = *(uint4 * )(&block_reduce_float[0]);
+        current_m = prev_m;
         #pragma unroll
         for (int i = 0; i < BLOCK_SIZE / 32; ++i){ // 8
-            current_l += local_float[i];
+            current_m = max(current_m, local_float[i]);
+        }
+        // load score
+        current_l = 0;
+        #pragma unroll
+        for (int i = 0; i < ATTN_SPLIT / 256; ++i){
+            *(uint4 * )(&local_attn_score[8 * i]) = *(uint4 * )(&block_reduce_half[lane_id * ATTN_SPLIT / 32 + i * 8]);
+            #pragma unroll
+            for (int ki = 0; ki < 8; ki++) {
+                float exp_ = exp(__half2float(local_attn_score[8 * i + ki]) - current_m); // safe softmax
+                local_attn_score[8 * i + ki] = exp_;
+                current_l += exp_;
+            }
+        }
+        // warp reduce to lane_id 0 
+        #pragma unroll
+        for (int mask = 16; mask > 0; mask >>= 1) {
+            current_l += __shfl_down_sync(0xffffffff, current_l, mask);
+        }
+        // broad cast
+        current_l = __shfl_sync(0xffffffff, current_l, 0);
+        current_l += prev_l * exp(prev_m - current_m);
+        prev_m = current_m;
+        if (head_idx == 0) {
+            output[tid] = current_l;
         }
         // score * V
-        for (int i = 0; i < 16; ++i){
-            float score = 0;
-            int offset = (iter / ATTN_SPLIT) * ATTN_SPLIT + lane_id * 32;
-            for (int di = 0; di < 4; ++di) {
+        // 16 x 64
+        for (int i = 0; i < 16; ++i) {
+            float attntion = 0;
+            // starting column
+            int column_id = (iter / (ATTN_SPLIT / 8)) * ATTN_SPLIT + lane_id * ATTN_SPLIT / 32;
+            int row_id = warp_id * 16 + i; 
+            for (int di = 0; di < ATTN_SPLIT / (32 * 8); ++di) { // 8
                 *(uint4 * )(&local_half1[0]) = *(uint4 * )(&v_cache[
-                    batch_idx * HEAD_NUM * SEQ_LEN * HEAD_DIM + head_idx * SEQ_LEN * HEAD_DIM + SEQ_LEN * (16 * warp_id + i) + offset + 8 * di
+                    batch_idx * HEAD_NUM * SEQ_LEN * HEAD_DIM + 
+                    head_idx * SEQ_LEN * HEAD_DIM + 
+                    SEQ_LEN * row_id + column_id + 8 * di
                 ]);
-                if (offset + 8 * di + 8 == SEQ_LEN) {
+                if (column_id + 8 * di + 8 == SEQ_LEN) {
                     local_half1[7] = shared_HEAD_DIM1[16 * warp_id + i];
                 }
                 #pragma unroll
                 for (int ki = 0; ki < 8; ki++) {
-                    score += __half2float(local_attn_score[di * 8 + ki]) * __half2float(local_half1[di]);
+                    attntion += __half2float(local_attn_score[di * 8 + ki]) * __half2float(local_half1[ki]);
                 }
             }
-            local_attn[i] = score;
+            local_attn[i] = attntion;
         }
-        for (int i = 0; i < 16; ++i){
+        for (int i = 0; i < 16; ++i) {
             #pragma unroll
             for (int mask = 16; mask > 0; mask >>= 1) {
                 local_attn[i] += __shfl_down_sync(0xffffffff, local_attn[i], mask);
             }
+            local_attn[i] = __shfl_sync(0xffffffff, local_attn[i], 0);
         }
         #pragma unroll
-        for (int i = 0; i < 16; ++i){
-            embedding_reg[i] = __float2half(__half2float(embedding_reg[i])*prev_l/current_l+__half2float(local_attn[i])/current_l);
+        for (int i = 0; i < 16; ++i) {
+            embedding_reg[i] = __float2half(__half2float(embedding_reg[i]) * prev_l / current_l + __half2float(local_attn[i]) / current_l);
         }
         prev_l = current_l;
     }
@@ -428,6 +452,8 @@ __global__ void decode(
         }
         block_reduce_float[0] = __float2half(1.f / (std::sqrt(thread_sum / float(EMBEDDING_DIM))) + eps);
     }
+    __syncthreads();
+    
     rms_rcp = block_reduce_float[0];
     *(uint4 * )(&weight_reg[0]) = *(uint4 * )(&w_rms2[tid * 16]);
     #pragma unroll
@@ -439,7 +465,9 @@ __global__ void decode(
     for (int di = 0; di < 8; di++) {
         embedding_reg[di + 8] = __hmul(__hmul(residual_embedding_reg[di + 8], rms_rcp), weight_reg[di]);
     }
-    
+    // #------------------------------------------------------------------------
+    // * 0.583782
+
     // #------------------------------------------------------------------------
     // # FFN
     // #------------------------------------------------------------------------
@@ -474,6 +502,7 @@ __global__ void decode(
         }
     }
     __syncthreads();
+
     if(tid < FFN_HIDDEN / COOPERATE_BLOCK_NUM){
         *(uint4 * )(&local_half1[0]) = *(uint4 * )(&block_reduce_half[tid * (BLOCK_SIZE / 32)]);
         *(uint4 * )(&local_half2[0]) = *(uint4 * )(&block_reduce_half[(FFN_HIDDEN / COOPERATE_BLOCK_NUM + tid) * BLOCK_SIZE / 32]);
@@ -488,6 +517,8 @@ __global__ void decode(
         shared_HEAD_DIM0[tid] = __float2half(tmp * __half2float(local2));
     }
     __syncthreads();
+    // * 0.75223
+
     // ffn 2
     __align__(16) half local_ffn_tile[FFN_HIDDEN / COOPERATE_BLOCK_NUM];
     for (int i = 0; i < (FFN_HIDDEN / COOPERATE_BLOCK_NUM) / 8; ++i) {
@@ -513,11 +544,12 @@ __global__ void decode(
             embedding_reg[di + 8] += __half2float(local_ffn_tile[i]) * __half2float(weight_reg[di]);
         }
     }
-    // * 0.777626
+    // * 0.756122
     *(uint4 * )(&global_reduction[batch_idx * HEAD_NUM * EMBEDDING_DIM + head_idx * EMBEDDING_DIM + tid * 16]) = *(uint4 * )(&embedding_reg[0]);
     *(uint4 * )(&global_reduction[batch_idx * HEAD_NUM * EMBEDDING_DIM + head_idx * EMBEDDING_DIM + tid * 16 + 8]) = *(uint4 * )(&embedding_reg[8]);
     grid.sync();
     // #------------------------------------------------------------------------
+    // * 0.812032
 
     // #------------------------------------------------------------------------
     // # Reduce and Residual
@@ -538,13 +570,12 @@ __global__ void decode(
         *(uint4 * )(&output[batch_idx * EMBEDDING_DIM + tid * 16]) = *(uint4 * )(&residual_embedding_reg[0]);
         *(uint4 * )(&output[batch_idx * EMBEDDING_DIM + tid * 16 + 8]) = *(uint4 * )(&residual_embedding_reg[8]);
     }
+    // * 0.824115
 }
 
 int main(int argc, char **argv) {
     // shared memory size per threadBlock
-    size_t dynamicShMemSize =
-            sizeof(float) * (BLOCK_SIZE + SMALL_COOPERATE_BLOCK_NUM) +
-            sizeof(half) * (HEAD_DIM * 4 + ATTN_SPLIT + EMBEDDING_DIM);
+    size_t dynamicShMemSize = sizeof(float) * (BLOCK_SIZE / 16) + sizeof(half) * (ATTN_SPLIT * 2 + HEAD_DIM * 2);
     cudaFuncSetAttribute(decode, cudaFuncAttributeMaxDynamicSharedMemorySize, dynamicShMemSize);
 
     int rope_offset = SEQ_LEN;
@@ -629,14 +660,9 @@ int main(int argc, char **argv) {
     h_output = new half[BATCH_SIZE * EMBEDDING_DIM];
     cudaMalloc(reinterpret_cast<void **>(&d_output), sizeof(half) * BATCH_SIZE * EMBEDDING_DIM);
 
-    half h_global_reduce[BATCH_SIZE * HEAD_NUM * EMBEDDING_DIM];
     half *global_reduce;
-    cudaMalloc(reinterpret_cast<void **>(&global_reduce), sizeof(half) * BATCH_SIZE * HEAD_NUM *
-                                                               (SMALL_COOPERATE_BLOCK_NUM * HEAD_DIM));
-    cudaMemcpy(reinterpret_cast<void *>(global_reduce), h_global_reduce,
-               sizeof(half) * BATCH_SIZE * HEAD_NUM * EMBEDDING_DIM,
-               cudaMemcpyHostToDevice);
-   
+    cudaMalloc(reinterpret_cast<void **>(&global_reduce), sizeof(half) * BATCH_SIZE * HEAD_NUM * EMBEDDING_DIM);
+    
     void *kernelArgs[] = {
             &d_output, &d_input,
             &d_w_q, &d_w_k, &d_w_v, &d_w_o,
@@ -652,7 +678,7 @@ int main(int argc, char **argv) {
      * ! Without cluster, we have to do heavy global sync in grid scope.
      *      So we try to do less intro-block sync in the kernel.
      */
-    dim3 grid(BATCH_SIZE, HEAD_NUM, SMALL_COOPERATE_BLOCK_NUM);
+    dim3 grid(BATCH_SIZE, HEAD_NUM, COOPERATE_BLOCK_NUM/HEAD_NUM);
     dim3 block(BLOCK_SIZE);
     int warmup = 50;
     int test = 10;
