@@ -54,7 +54,7 @@ void fill_matrix(T* mat, int sz) {
 __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     half* output, // 1 * hidden_dim
     half* input,  // 1 * hidden_dim
-    half* w_qkvo,    // 4 * hidden_dim * hidden_dim
+    half* w_qkvo,    // 3 * hidden_dim * hidden_dim
     half* kv_cache,// 2 * seqlen * head_num * head_dim
     half* ffn_gate,  // hidden_dim * ffn_dim
     half* ffn_down,  // ffn_dim * hidden_dim
@@ -65,7 +65,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     float* cos,       // head_dim
     float* sin,       // head_dim
     const __grid_constant__ CUtensorMap tensor_map,
-    const __grid_constant__ CUtensorMap tensor_map_kv_cache
+    const __grid_constant__ CUtensorMap tensor_map_kv_cache,
+    const __grid_constant__ CUtensorMap tensor_map_weight_o
 )
 {
     namespace cg = cooperative_groups;
@@ -78,8 +79,23 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     const uint32_t lane_id = tid % WARP_SIZE; // 32 per warp
     const uint32_t warp_id = tid / WARP_SIZE;
 
-    // Load input [1 x HIDDEN_DIM / CLUSTR_SIZE] to shared memory
-    __shared__ __align__(16) half input_shmem[DIM_PER_BLOCK];
+    // Init shared memory
+    extern __shared__ uint8_t smem[];
+    half* input_shmem = (half*)smem;
+    float* reduction = (float*)(smem + DIM_PER_BLOCK * sizeof(half));
+    half* local_q = (half*)(smem + DIM_PER_BLOCK * sizeof(half) + NUM_WARPS * sizeof(float));
+    half* local_kv = (half*)(smem + DIM_PER_BLOCK * sizeof(half) + NUM_WARPS * sizeof(float) + HEAD_DIM * sizeof(half));
+    half* weight = (half*)((uintptr_t)(smem + DIM_PER_BLOCK * sizeof(half) + NUM_WARPS * sizeof(float) + 2 * HEAD_DIM * sizeof(half)) + 127 & ~127);
+    half* weight_buffer = (half*)((uintptr_t)(smem + DIM_PER_BLOCK * sizeof(half) + NUM_WARPS * sizeof(float) + 2 * HEAD_DIM * sizeof(half) + TMA_LOAD_ONCE * HEAD_DIM * sizeof(half)) + 127 & ~127);
+    half* local_buffer = (half*)((uintptr_t)(smem + DIM_PER_BLOCK * sizeof(half) + NUM_WARPS * sizeof(float) + 2 * HEAD_DIM * sizeof(half) + 2 * TMA_LOAD_ONCE * HEAD_DIM * sizeof(half)) + 127 & ~127);
+    half* attn_weight = (half*)((uintptr_t)(smem + DIM_PER_BLOCK * sizeof(half) + NUM_WARPS * sizeof(float) + 3 * HEAD_DIM * sizeof(half) + 2 * TMA_LOAD_ONCE * HEAD_DIM * sizeof(half)) + 127 & ~127);
+    
+    // Initialize shared memory barrier with the number of threads participating in the barrier.
+    #pragma nv_diag_suppress static_var_with_dynamic_init
+    __shared__ barrier bar;
+    __shared__ barrier bar_buffer;
+    __shared__ uint64_t barrier;
+
     #pragma unroll
     for (int i = tid * 8; i < DIM_PER_BLOCK; i+=BLOCK_SIZE * 8) {
         *(uint4*)(&input_shmem[i]) = *(uint4*)(&input[cluster_block_id * DIM_PER_BLOCK + i]);
@@ -87,9 +103,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     block.sync();
 
     // RMSNorm
-    __shared__ float reduction[NUM_WARPS];
-    float local_sum = 0;
     __shared__ float cluster_local_sum;
+    float local_sum = 0;
     half __align__(16) reg_input_norm[2], reg_weight_norm[2];
     for (int d = tid * 2; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 2) { 
         *(half2*)(&reg_input_norm[0]) = *(half2*)(&input_shmem[d]);
@@ -133,21 +148,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     }
     block.sync();
 
-    // For DSM reduce
-    __shared__ __align__(16) half local_buffer[HEAD_DIM];
-
     // Compute hidden @ wq
     float tmp = 0.0;
+    uint64_t tma_load_once_size = TMA_LOAD_ONCE * HEAD_DIM * sizeof(half);
     half __align__(16) reg_input[NUM_PER_THREAD];
-    half __align__(16) reg_weight[NUM_PER_THREAD];
-    __shared__ __align__(16) half local_q[HEAD_DIM];
-    __shared__ __align__(16) half local_kv[HEAD_DIM];
-    __shared__ alignas(128) half weight[TMA_LOAD_ONCE][HEAD_DIM];
-    __shared__ alignas(128) half weight_buffer[TMA_LOAD_ONCE][HEAD_DIM];
-    // Initialize shared memory barrier with the number of threads participating in the barrier.
-    #pragma nv_diag_suppress static_var_with_dynamic_init
-    __shared__ barrier bar;
-    __shared__ barrier bar_buffer;
+    
     if (tid == 0) {
         // Initialize barrier. All `blockDim.x` threads in block participate.
         init(&bar, blockDim.x);
@@ -163,13 +168,14 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     barrier::arrival_token token[2];
     if (tid == 0) {
         // Initiate bulk tensor copy.
-        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight, &tensor_map, head_id * HEAD_DIM, cluster_block_id * DIM_PER_BLOCK, bar);
+        cde::cp_async_bulk_tensor_2d_global_to_shared(weight, &tensor_map, head_id * HEAD_DIM, cluster_block_id * DIM_PER_BLOCK, bar);
         // Arrive on the barrier and tell how many bytes are expected to come in.
-        token[0] = cuda::device::barrier_arrive_tx(bar, 1, sizeof(weight));
+        token[0] = cuda::device::barrier_arrive_tx(bar, 1, tma_load_once_size);
     } else {
         // Other threads just arrive.
         token[0] = bar.arrive();
     }
+    bar.wait(std::move(token[0]));
 
     // Compute input @ w_q
     uint input_idx = (lane_id % NUM_THREAD_PER_ROW) * NUM_PER_THREAD;
@@ -177,8 +183,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     for (int id = 1; id < DIM_PER_BLOCK / TMA_LOAD_ONCE; id++) {
         if (id % 2) {
             if (tid == 0) {
-                cde::cp_async_bulk_tensor_2d_global_to_shared(&weight_buffer, &tensor_map, head_id * HEAD_DIM, cluster_block_id * DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar_buffer);
-                token[id % 2] = cuda::device::barrier_arrive_tx(bar_buffer, 1, sizeof(weight_buffer));
+                cde::cp_async_bulk_tensor_2d_global_to_shared(weight_buffer, &tensor_map, head_id * HEAD_DIM, cluster_block_id * DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar_buffer);
+                token[id % 2] = cuda::device::barrier_arrive_tx(bar_buffer, 1, tma_load_once_size);
             } else {
                 token[id % 2] = bar_buffer.arrive();
             }
@@ -187,13 +193,13 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
                 *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + (id - 1) * TMA_LOAD_ONCE + i]);
                 #pragma unroll
                 for (int d = 0; d < NUM_PER_THREAD; d++) {
-                    tmp += __half2float(reg_input[d] * weight[input_idx + i + d][weight_idx]);
+                    tmp += __half2float(reg_input[d] * weight[(input_idx + i + d) * HEAD_DIM + weight_idx]);
                 }
             }
         } else {
             if (tid == 0) {
-                cde::cp_async_bulk_tensor_2d_global_to_shared(&weight, &tensor_map, head_id * HEAD_DIM, cluster_block_id * DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar);
-                token[id % 2] = cuda::device::barrier_arrive_tx(bar, 1, sizeof(weight));
+                cde::cp_async_bulk_tensor_2d_global_to_shared(weight, &tensor_map, head_id * HEAD_DIM, cluster_block_id * DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar);
+                token[id % 2] = cuda::device::barrier_arrive_tx(bar, 1, tma_load_once_size);
             } else {
                 token[id % 2] = bar.arrive();
             }
@@ -202,7 +208,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
                 *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + (id - 1) * TMA_LOAD_ONCE + i]);
                 #pragma unroll
                 for (int d = 0; d < NUM_PER_THREAD; d++) {
-                    tmp += __half2float(reg_input[d] * weight_buffer[input_idx + i + d][weight_idx]);
+                    tmp += __half2float(reg_input[d] * weight_buffer[(input_idx + i + d) * HEAD_DIM + weight_idx]);
                 }
             }
         }
@@ -212,7 +218,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE + i]);
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
-            tmp += __half2float(reg_input[d] * weight_buffer[input_idx + i + d][weight_idx]);
+            tmp += __half2float(reg_input[d] * weight_buffer[(input_idx + i + d) * HEAD_DIM + weight_idx]);
         }
     }
     #pragma unroll
@@ -222,23 +228,24 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     if (lane_id % NUM_THREAD_PER_ROW == 0) {
         local_q[warp_id * NUM_ROW_PER_WARP + lane_id / NUM_THREAD_PER_ROW] = __float2half(tmp);
     }
-    block.sync();
-
+    // if(cluster_block_id == 0 && head_id == 0 && tid == 0)
+    //     printf("%f, %f \n", __half2float(local_q[0]), __half2float(local_q[127]));
     // Preload weight_k
-    tmp = 0.0;
     if (tid == 0) {
-        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight, &tensor_map, head_id * HEAD_DIM, HIDDEN_DIM + cluster_block_id * DIM_PER_BLOCK, bar);
-        token[0] = cuda::device::barrier_arrive_tx(bar, 1, sizeof(weight));
+        cde::cp_async_bulk_tensor_2d_global_to_shared(weight, &tensor_map, head_id * HEAD_DIM, HIDDEN_DIM + cluster_block_id * DIM_PER_BLOCK, bar);
+        token[0] = cuda::device::barrier_arrive_tx(bar, 1, tma_load_once_size);
     } else {
         token[0] = bar.arrive();
     }
+    bar.wait(std::move(token[0]));
 
     // Compute input @ w_k
+    tmp = 0.0;
     for (int id = 1; id < DIM_PER_BLOCK / TMA_LOAD_ONCE; id++) {
         if (id % 2) {
             if (tid == 0) {
-                cde::cp_async_bulk_tensor_2d_global_to_shared(&weight_buffer, &tensor_map, head_id * HEAD_DIM, HIDDEN_DIM + cluster_block_id * DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar_buffer);
-                token[id % 2] = cuda::device::barrier_arrive_tx(bar_buffer, 1, sizeof(weight_buffer));
+                cde::cp_async_bulk_tensor_2d_global_to_shared(weight_buffer, &tensor_map, head_id * HEAD_DIM, HIDDEN_DIM + cluster_block_id * DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar_buffer);
+                token[id % 2] = cuda::device::barrier_arrive_tx(bar_buffer, 1, tma_load_once_size);
             } else {
                 token[id % 2] = bar_buffer.arrive();
             }
@@ -247,13 +254,13 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
                 *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + (id - 1) * TMA_LOAD_ONCE + i]);
                 #pragma unroll
                 for (int d = 0; d < NUM_PER_THREAD; d++) {
-                    tmp += __half2float(reg_input[d] * weight[input_idx + i + d][weight_idx]);
+                    tmp += __half2float(reg_input[d] * weight[(input_idx + i + d) * HEAD_DIM + weight_idx]);
                 }
             }
         } else {
             if (tid == 0) {
-                cde::cp_async_bulk_tensor_2d_global_to_shared(&weight, &tensor_map, head_id * HEAD_DIM, HIDDEN_DIM + cluster_block_id * DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar);
-                token[id % 2] = cuda::device::barrier_arrive_tx(bar, 1, sizeof(weight));
+                cde::cp_async_bulk_tensor_2d_global_to_shared(weight, &tensor_map, head_id * HEAD_DIM, HIDDEN_DIM + cluster_block_id * DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar);
+                token[id % 2] = cuda::device::barrier_arrive_tx(bar, 1, tma_load_once_size);
             } else {
                 token[id % 2] = bar.arrive();
             }
@@ -262,7 +269,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
                 *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + (id - 1) * TMA_LOAD_ONCE + i]);
                 #pragma unroll
                 for (int d = 0; d < NUM_PER_THREAD; d++) {
-                    tmp += __half2float(reg_input[d] * weight_buffer[input_idx + i + d][weight_idx]);
+                    tmp += __half2float(reg_input[d] * weight_buffer[(input_idx + i + d) * HEAD_DIM + weight_idx]);
                 }
             }
         }
@@ -272,7 +279,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE + i]);
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
-            tmp += __half2float(reg_input[d] * weight_buffer[input_idx + i + d][weight_idx]);
+            tmp += __half2float(reg_input[d] * weight_buffer[(input_idx + i + d) * HEAD_DIM + weight_idx]);
         }
     }
     #pragma unroll
@@ -284,7 +291,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     }
     block.sync();
     // if(tid == 0)
-    //     printf("%f, %f \n", __half2float(local_q[0]), __half2float(local_kv[127]));
+    //     printf("%f, %f \n", __half2float(local_kv[0]), __half2float(local_q[127]));
 
     // Compute partial RoPE
     half2 q_rope, q_rope_1;
@@ -309,7 +316,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     }
 
     uint32_t size = HEAD_DIM * sizeof(half);
-    __shared__ uint64_t barrier;
     uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&barrier));
 
     // Q reduce through DSM
@@ -433,38 +439,14 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     }
     // if(head_id == 0 && cluster_block_id == CLUSTER_SIZE - 1 && tid == 0)
     //     printf("%f, %f, %f, %f \n", __half2float(local_q[0]), __half2float(local_kv[127]), __half2float(local_q[127]), __half2float(local_kv[0]));
+
     // Compute Q @ K^T
-    __shared__ __align__(16) half attn_weight[KV_DIM_PER_BLOCK];
-    // if(head_id == 0 && cluster_block_id == CLUSTER_SIZE - 1 && tid == 0)
-    //     printf("%f, %f, %f, %f \n", __half2float(attn_weight[0]), __half2float(attn_weight[1]), __half2float(attn_weight[2]), __half2float(attn_weight[3]));
-    // for (int i = 0; i < NUM_ROW_PER_WARP_2; i+=NUM_ROW_PER_WARP) {
-    //     tmp = 0.0;
-    //     for (int j = 0; j < HEAD_DIM; j+=NUM_PER_ROW) {
-    //         *(uint4*)(&reg_input[0]) = *(uint4*)(&local_q[input_idx + j]);
-    //         if (cluster_block_id == CLUSTER_SIZE - 1 && warp_id == NUM_WARPS - 1 && (i + lane_id / NUM_THREAD_PER_ROW) == NUM_ROW_PER_WARP_2 - 1) {
-    //             *(uint4*)(&reg_weight[0]) = *(uint4*)(&local_kv[input_idx + j]);
-    //         } else {
-    //             *(uint4*)(&reg_weight[0]) = *(uint4*)(&k_cache[kv_idx + i * HIDDEN_DIM + j]);
-    //         }
-    //         #pragma unroll
-    //         for (int d = 0; d < NUM_PER_THREAD; d++) {
-    //             tmp += __half2float(reg_input[d] * reg_weight[d]);
-    //         }
-    //     }
-    //     #pragma unroll
-    //     for (int mask = (NUM_THREAD_PER_ROW >> 1); mask > 0; mask >>= 1) {
-    //         tmp += __shfl_down_sync(0xffffffff, tmp, mask);
-    //     }
-    //     if (lane_id % NUM_THREAD_PER_ROW == 0) {
-    //         attn_weight[warp_id * NUM_ROW_PER_WARP_2 + i + lane_id / NUM_THREAD_PER_ROW] = __float2half(tmp);
-    //     }
-    // }
+    half __align__(16) reg_weight[NUM_PER_THREAD];
     input_idx = (lane_id % NUM_THREAD_PER_ROW_2) * NUM_PER_THREAD;
     weight_idx = warp_id * NUM_ROW_PER_WARP_2 + lane_id / NUM_THREAD_PER_ROW_2;
-    tmp = 0.0;
     if (tid == 0) {
-        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight, &tensor_map_kv_cache, head_id * HEAD_DIM, cluster_block_id * KV_DIM_PER_BLOCK, bar);
-        token[0] = cuda::device::barrier_arrive_tx(bar, 1, sizeof(weight));
+        cde::cp_async_bulk_tensor_2d_global_to_shared(weight, &tensor_map_kv_cache, head_id * HEAD_DIM, cluster_block_id * KV_DIM_PER_BLOCK, bar);
+        token[0] = cuda::device::barrier_arrive_tx(bar, 1, tma_load_once_size);
     } else {
         token[0] = bar.arrive();
     }
@@ -473,8 +455,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     for (int id = 1; id < KV_DIM_PER_BLOCK / TMA_LOAD_ONCE; id++) {
         if (id % 2) {
             if (tid == 0) {
-                cde::cp_async_bulk_tensor_2d_global_to_shared(&weight_buffer, &tensor_map_kv_cache, head_id * HEAD_DIM, cluster_block_id * DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar_buffer);
-                token[id % 2] = cuda::device::barrier_arrive_tx(bar_buffer, 1, sizeof(weight_buffer));
+                cde::cp_async_bulk_tensor_2d_global_to_shared(weight_buffer, &tensor_map_kv_cache, head_id * HEAD_DIM, cluster_block_id * DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar_buffer);
+                token[id % 2] = cuda::device::barrier_arrive_tx(bar_buffer, 1, tma_load_once_size);
             } else {
                 token[id % 2] = bar_buffer.arrive();
             }
@@ -482,7 +464,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
             tmp = 0.0;
             for (int j = 0; j < HEAD_DIM; j+=NUM_PER_ROW_2) {
                 *(uint4*)(&reg_input[0]) = *(uint4*)(&local_q[input_idx + j]);
-                *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight[weight_idx][input_idx + j]);
+                *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight[weight_idx * HEAD_DIM + input_idx + j]);
                 #pragma unroll
                 for (int d = 0; d < NUM_PER_THREAD; d++) {
                     tmp += __half2float(reg_input[d] * reg_weight[d]);
@@ -497,8 +479,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
             }
         } else {
             if (tid == 0) {
-                cde::cp_async_bulk_tensor_2d_global_to_shared(&weight, &tensor_map_kv_cache, head_id * HEAD_DIM, cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar);
-                token[id % 2] = cuda::device::barrier_arrive_tx(bar, 1, sizeof(weight));
+                cde::cp_async_bulk_tensor_2d_global_to_shared(weight, &tensor_map_kv_cache, head_id * HEAD_DIM, cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar);
+                token[id % 2] = cuda::device::barrier_arrive_tx(bar, 1, tma_load_once_size);
             } else {
                 token[id % 2] = bar.arrive();
             }
@@ -506,7 +488,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
             tmp = 0.0;
             for (int j = 0; j < HEAD_DIM; j+=NUM_PER_ROW_2) {
                 *(uint4*)(&reg_input[0]) = *(uint4*)(&local_q[input_idx + j]);
-                *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight_buffer[weight_idx][input_idx + j]);
+                *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight_buffer[weight_idx * HEAD_DIM + input_idx + j]);
                 #pragma unroll
                 for (int d = 0; d < NUM_PER_THREAD; d++) {
                     tmp += __half2float(reg_input[d] * reg_weight[d]);
@@ -528,7 +510,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         if (cluster_block_id == CLUSTER_SIZE - 1 && warp_id == NUM_WARPS - 1 && lane_id / NUM_THREAD_PER_ROW_2 == NUM_ROW_PER_WARP_2 - 1) {
             *(uint4*)(&reg_weight[0]) = *(uint4*)(&local_kv[input_idx + j]);
         } else {
-            *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight_buffer[weight_idx][input_idx + j]);
+            *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight_buffer[weight_idx * HEAD_DIM + input_idx + j]);
         }
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
@@ -543,12 +525,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         attn_weight[warp_id * NUM_ROW_PER_WARP_2 + lane_id / NUM_THREAD_PER_ROW_2 + (KV_DIM_PER_BLOCK / TMA_LOAD_ONCE - 1) * TMA_LOAD_ONCE] = __float2half(tmp);
     }
     block.sync();
-    // if(head_id == 0 && cluster_block_id == 0)
-    //     printf("%f, %f \n", __half2float(attn_weight[0]), __half2float(attn_weight[KV_DIM_PER_BLOCK - 1]));
+    // // if(head_id == 0 && cluster_block_id == CLUSTER_SIZE - 1)
+    // //     printf("%f, %f \n", __half2float(attn_weight[0]), __half2float(attn_weight[KV_DIM_PER_BLOCK - 1]));
     // Softmax
     float local_scale = 0.0f;
     half tmp_;
-    __shared__ float final_scale;
     for (int i = 0; i < KV_DIM_PER_BLOCK / BLOCK_SIZE; i++) {
         tmp_ = hexp(attn_weight[tid * (KV_DIM_PER_BLOCK / BLOCK_SIZE) + i] / __float2half(sqrt(1.0 * HEAD_DIM)));
         attn_weight[tid * (KV_DIM_PER_BLOCK / BLOCK_SIZE) + i] = tmp_;
@@ -556,43 +537,40 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     }
     // if(head_id == 0 && cluster_block_id == 0)
     //     printf("%f, %f \n", __half2float(attn_weight[0]), __half2float(attn_weight[KV_DIM_PER_BLOCK - 1]));
-    __shared__ float local_attn_weight_reduction[NUM_WARPS];
     #pragma unroll
     for (int mask = 16; mask > 0; mask >>= 1) {
         local_scale += __shfl_down_sync(0xffffffff, local_scale, mask);
     }
     if (lane_id == 0) {
-        local_attn_weight_reduction[warp_id] = local_scale;
+        reduction[warp_id] = local_scale;
     }
     block.sync();
     if (tid < NUM_WARPS) {
-        local_scale = local_attn_weight_reduction[tid];
+        local_scale = reduction[tid];
     }
     #pragma unroll
     for (int mask = NUM_WARPS / 2; mask > 0; mask >>= 1) {
         local_scale += __shfl_down_sync(0xffffffff, local_scale, mask);
     }
     if(tid == 0) {
-        final_scale = local_scale;
+        cluster_local_sum = local_scale;
     }
     cluster.sync();
     // Reduce through DSM
     for (int i = 1; i < cluster.num_blocks() - 1; i++) {
         if (tid == 0) {
-            local_scale = final_scale;
+            local_scale = cluster_local_sum;
             int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
-            float* dst_shmem = cluster.map_shared_rank(&final_scale, dst_cta);
+            float* dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);
             atomicAdd(dst_shmem, local_scale);
         }
         cluster.sync();
     }
-    // if(head_id == 0 && cluster_block_id == 0)
-    //     printf("%f, %f \n", __half2float(attn_weight[0]), __half2float(attn_weight[KV_DIM_PER_BLOCK - 1]));
     for (int i = tid; i < KV_DIM_PER_BLOCK; i+=BLOCK_SIZE) {
-        attn_weight[i] = __float2half(__half2float(attn_weight[i]) / final_scale);
+        attn_weight[i] = __float2half(__half2float(attn_weight[i]) / cluster_local_sum);
     }
     block.sync();
-    // if(head_id == 0 && cluster_block_id == CLUSTER_SIZE - 1)
+    // if(head_id == 0 && cluster_block_id == 0)
     //     printf("%f, %f \n", __half2float(attn_weight[0]), __half2float(attn_weight[KV_DIM_PER_BLOCK - 1]));
     
     input_idx = (lane_id % NUM_THREAD_PER_ROW) * NUM_PER_THREAD;
@@ -600,8 +578,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     // Preload weight_v
     tmp = 0.0;
     if (tid == 0) {
-        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight, &tensor_map, head_id * HEAD_DIM, HIDDEN_DIM * 2 + cluster_block_id * DIM_PER_BLOCK, bar);
-        token[0] = cuda::device::barrier_arrive_tx(bar, 1, sizeof(weight));
+        cde::cp_async_bulk_tensor_2d_global_to_shared(weight, &tensor_map, head_id * HEAD_DIM, HIDDEN_DIM * 2 + cluster_block_id * DIM_PER_BLOCK, bar);
+        token[0] = cuda::device::barrier_arrive_tx(bar, 1, tma_load_once_size);
     } else {
         token[0] = bar.arrive();
     }
@@ -610,8 +588,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     for (int id = 1; id < DIM_PER_BLOCK / TMA_LOAD_ONCE; id++) {
         if (id % 2) {
             if (tid == 0) {
-                cde::cp_async_bulk_tensor_2d_global_to_shared(&weight_buffer, &tensor_map, head_id * HEAD_DIM, HIDDEN_DIM * 2 + cluster_block_id * DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar_buffer);
-                token[id % 2] = cuda::device::barrier_arrive_tx(bar_buffer, 1, sizeof(weight_buffer));
+                cde::cp_async_bulk_tensor_2d_global_to_shared(weight_buffer, &tensor_map, head_id * HEAD_DIM, HIDDEN_DIM * 2 + cluster_block_id * DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar_buffer);
+                token[id % 2] = cuda::device::barrier_arrive_tx(bar_buffer, 1, tma_load_once_size);
             } else {
                 token[id % 2] = bar_buffer.arrive();
             }
@@ -620,13 +598,13 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
                 *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + (id - 1) * TMA_LOAD_ONCE + i]);
                 #pragma unroll
                 for (int d = 0; d < NUM_PER_THREAD; d++) {
-                    tmp += __half2float(reg_input[d] * weight[input_idx + i + d][weight_idx]);
+                    tmp += __half2float(reg_input[d] * weight[(input_idx + i + d) * HEAD_DIM + weight_idx]);
                 }
             }
         } else {
             if (tid == 0) {
-                cde::cp_async_bulk_tensor_2d_global_to_shared(&weight, &tensor_map, head_id * HEAD_DIM, HIDDEN_DIM * 2 + cluster_block_id * DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar);
-                token[id % 2] = cuda::device::barrier_arrive_tx(bar, 1, sizeof(weight));
+                cde::cp_async_bulk_tensor_2d_global_to_shared(weight, &tensor_map, head_id * HEAD_DIM, HIDDEN_DIM * 2 + cluster_block_id * DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar);
+                token[id % 2] = cuda::device::barrier_arrive_tx(bar, 1, tma_load_once_size);
             } else {
                 token[id % 2] = bar.arrive();
             }
@@ -635,7 +613,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
                 *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + (id - 1) * TMA_LOAD_ONCE + i]);
                 #pragma unroll
                 for (int d = 0; d < NUM_PER_THREAD; d++) {
-                    tmp += __half2float(reg_input[d] * weight_buffer[input_idx + i + d][weight_idx]);
+                    tmp += __half2float(reg_input[d] * weight_buffer[(input_idx + i + d) * HEAD_DIM + weight_idx]);
                 }
             }
         }
@@ -645,7 +623,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE + i]);
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
-            tmp += __half2float(reg_input[d] * weight_buffer[input_idx + i + d][weight_idx]);
+            tmp += __half2float(reg_input[d] * weight_buffer[(input_idx + i + d) * HEAD_DIM + weight_idx]);
         }
     }
     #pragma unroll
@@ -714,15 +692,13 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         }
         cluster.sync();
     }
-    // if(cluster_block_id == 0 && head_id == 0)
-    //     printf("%f, %f \n", __half2float(attn_weight[0]), __half2float(attn_weight[KV_DIM_PER_BLOCK - 1]));
-    
-    __shared__ __align__(16) half local_output[HEAD_DIM];
-    
+    // if(head_id == 0 && cluster_block_id == 0)
+    //     printf("%f, %f \n", __half2float(local_kv[0]), __half2float(local_kv[127]));
+
     // Preload V
     if (tid == 0) {
-        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight, &tensor_map_kv_cache, head_id * HEAD_DIM, SEQ_LEN + cluster_block_id * KV_DIM_PER_BLOCK, bar);
-        token[0] = cuda::device::barrier_arrive_tx(bar, 1, sizeof(weight));
+        cde::cp_async_bulk_tensor_2d_global_to_shared(weight, &tensor_map_kv_cache, head_id * HEAD_DIM, SEQ_LEN + cluster_block_id * KV_DIM_PER_BLOCK, bar);
+        token[0] = cuda::device::barrier_arrive_tx(bar, 1, tma_load_once_size);
     } else {
         token[0] = bar.arrive();
     }
@@ -732,8 +708,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     for (int id = 1; id < KV_DIM_PER_BLOCK / TMA_LOAD_ONCE; id++) {
         if (id % 2) {
             if (tid == 0) {
-                cde::cp_async_bulk_tensor_2d_global_to_shared(&weight_buffer, &tensor_map_kv_cache, head_id * HEAD_DIM, SEQ_LEN + cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar_buffer);
-                token[id % 2] = cuda::device::barrier_arrive_tx(bar_buffer, 1, sizeof(weight_buffer));
+                cde::cp_async_bulk_tensor_2d_global_to_shared(weight_buffer, &tensor_map_kv_cache, head_id * HEAD_DIM, SEQ_LEN + cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar_buffer);
+                token[id % 2] = cuda::device::barrier_arrive_tx(bar_buffer, 1, tma_load_once_size);
             } else {
                 token[id % 2] = bar_buffer.arrive();
             }
@@ -742,13 +718,13 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
                 *(uint4*)(&reg_input[0]) = *(uint4*)(&attn_weight[input_idx + (id - 1) * TMA_LOAD_ONCE + i]);
                 #pragma unroll
                 for (int d = 0; d < NUM_PER_THREAD; d++) {
-                    tmp += __half2float(reg_input[d] * weight[input_idx + i + d][weight_idx]);
+                    tmp += __half2float(reg_input[d] * weight[(input_idx + i + d) * HEAD_DIM + weight_idx]);
                 }
             }
         } else {
             if (tid == 0) {
-                cde::cp_async_bulk_tensor_2d_global_to_shared(&weight, &tensor_map_kv_cache, head_id * HEAD_DIM, SEQ_LEN + cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar);
-                token[id % 2] = cuda::device::barrier_arrive_tx(bar, 1, sizeof(weight));
+                cde::cp_async_bulk_tensor_2d_global_to_shared(weight, &tensor_map_kv_cache, head_id * HEAD_DIM, SEQ_LEN + cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar);
+                token[id % 2] = cuda::device::barrier_arrive_tx(bar, 1, tma_load_once_size);
             } else {
                 token[id % 2] = bar.arrive();
             }
@@ -757,7 +733,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
                 *(uint4*)(&reg_input[0]) = *(uint4*)(&attn_weight[input_idx + (id - 1) * TMA_LOAD_ONCE + i]);
                 #pragma unroll
                 for (int d = 0; d < NUM_PER_THREAD; d++) {
-                    tmp += __half2float(reg_input[d] * weight_buffer[input_idx + i + d][weight_idx]);
+                    tmp += __half2float(reg_input[d] * weight_buffer[(input_idx + i + d) * HEAD_DIM + weight_idx]);
                 }
             }
         }
@@ -766,11 +742,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     for (int i = 0; i < TMA_LOAD_ONCE; i+=NUM_PER_ROW) { 
         *(uint4*)(&reg_input[0]) = *(uint4*)(&attn_weight[input_idx + ((KV_DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE + i]);
         if (cluster_block_id == CLUSTER_SIZE - 1 && i == TMA_LOAD_ONCE - NUM_PER_ROW && (lane_id % NUM_THREAD_PER_ROW) == NUM_THREAD_PER_ROW - 1) {
-            weight_buffer[input_idx + i + NUM_PER_THREAD - 1][weight_idx] = local_kv[warp_id * NUM_ROW_PER_WARP + lane_id / NUM_THREAD_PER_ROW];
+            weight_buffer[(input_idx + i + NUM_PER_THREAD - 1) * HEAD_DIM + weight_idx] = local_kv[warp_id * NUM_ROW_PER_WARP + lane_id / NUM_THREAD_PER_ROW];
         }
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
-            tmp += __half2float(reg_input[d] * weight_buffer[input_idx + i + d][weight_idx]);
+            tmp += __half2float(reg_input[d] * weight_buffer[(input_idx + i + d) * HEAD_DIM + weight_idx]);
         }
     }
     #pragma unroll
@@ -778,7 +754,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         tmp += __shfl_down_sync(0xffffffff, tmp, mask);
     }
     if (lane_id % NUM_THREAD_PER_ROW == 0) {
-        local_output[warp_id * NUM_ROW_PER_WARP + lane_id / NUM_THREAD_PER_ROW] = __float2half(tmp);
+        local_q[warp_id * NUM_ROW_PER_WARP + lane_id / NUM_THREAD_PER_ROW] = __float2half(tmp);
     }
     block.sync();
     // if(head_id == 0 && cluster_block_id == 0)
@@ -799,7 +775,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         }
         cluster.sync();
         if (tid == 0) {
-            uint32_t src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_output));
+            uint32_t src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_q));
             uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_buffer));
             uint32_t dst_cta = (cluster_block_id + i) % cluster.num_blocks();
             uint32_t neighbor_dst_addr;
@@ -837,14 +813,18 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         // Add
         if (tid < HEAD_DIM / 2) {
             half2 buffer = *(half2*)(&local_buffer[tid * 2]);
-            *(half2*)(&local_output[tid * 2]) = __hadd2(*(half2*)(&local_output[tid * 2]), buffer);
+            *(half2*)(&local_q[tid * 2]) = __hadd2(*(half2*)(&local_q[tid * 2]), buffer);
         }
         cluster.sync();
     }
-    // if(head_id == 0 && cluster_block_id == 0)
-    //     printf("%f, %f \n", __half2float(local_output[0]), __half2float(local_output[127]));
+    // if(head_id == 0 && cluster_block_id == CLUSTER_SIZE - 1)
+    //     printf("%f, %f \n", __half2float(local_q[0]), __half2float(local_q[127]));
+
+    // __shared__ alignas(128) half weight_o[HEAD_DIM][TMA_LOAD_ONCE];
+    // __shared__ alignas(128) half weight_o_buffer[HEAD_DIM][TMA_LOAD_ONCE];
+    // input_idx = (lane_id % NUM_THREAD_PER_ROW_2) * NUM_PER_THREAD;
+    // weight_idx = warp_id * NUM_ROW_PER_WARP_2 + lane_id / NUM_THREAD_PER_ROW_2;
     // Compute output @ w_o
-    // weight_idx = head_id * HEAD_DIM + cluster_block_id * DIM_PER_BLOCK * HIDDEN_DIM + warp_id * NUM_ROW_PER_WARP_3 * HIDDEN_DIM + (lane_id / NUM_THREAD_PER_ROW) * HIDDEN_DIM + (lane_id % NUM_THREAD_PER_ROW) * NUM_PER_THREAD;
     // for (int i = 0; i < NUM_ROW_PER_WARP_3; i+=NUM_ROW_PER_WARP) {
     //     tmp = 0.0;
     //     for (int j = 0; j < HEAD_DIM; j+=NUM_PER_ROW) {
@@ -862,6 +842,82 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     //     if (lane_id % NUM_THREAD_PER_ROW == 0) {
     //         atomicAdd(&global_reduce[cluster_block_id * DIM_PER_BLOCK + warp_id * NUM_ROW_PER_WARP_3 + i + lane_id / NUM_THREAD_PER_ROW], __float2half(tmp));
     //     }
+    // }
+    // if (tid == 0) {
+    //     cde::cp_async_bulk_tensor_2d_global_to_shared(&weight_o, &tensor_map_weight_o, cluster_block_id * DIM_PER_BLOCK, head_id * HEAD_DIM, bar);
+    //     token[0] = cuda::device::barrier_arrive_tx(bar, 1, sizeof(weight_o));
+    // } else {
+    //     token[0] = bar.arrive();
+    // }
+
+    // Compute output @ w_o
+    // for (int id = 1; id < DIM_PER_BLOCK / TMA_LOAD_ONCE; id++) {
+    //     if (id % 2) {
+    //         if (tid == 0) {
+    //             cde::cp_async_bulk_tensor_2d_global_to_shared(&weight_o_buffer, &tensor_map_weight_o, cluster_block_id * DIM_PER_BLOCK + id * TMA_LOAD_ONCE, head_id * HEAD_DIM, bar_buffer);
+    //             token[id % 2] = cuda::device::barrier_arrive_tx(bar_buffer, 1, sizeof(weight_o_buffer));
+    //         } else {
+    //             token[id % 2] = bar_buffer.arrive();
+    //         }
+    //         bar.wait(std::move(token[(id - 1) % 2]));
+    //         tmp = 0.0;
+    //         for (int j = 0; j < HEAD_DIM; j+=NUM_PER_ROW_2) {
+    //             *(uint4*)(&reg_input[0]) = *(uint4*)(&local_output[input_idx + j]);
+    //             *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight_o[input_idx + j][weight_idx]);
+    //             #pragma unroll
+    //             for (int d = 0; d < NUM_PER_THREAD; d++) {
+    //                 tmp += __half2float(reg_input[d] * reg_weight[d]);
+    //             }
+    //         }
+    //         #pragma unroll
+    //         for (int mask = (NUM_THREAD_PER_ROW_2 >> 1); mask > 0; mask >>= 1) {
+    //             tmp += __shfl_down_sync(0xffffffff, tmp, mask);
+    //         }
+    //         if (lane_id % NUM_THREAD_PER_ROW_2 == 0) {
+    //             // atomicAdd(&global_reduce[cluster_block_id * DIM_PER_BLOCK + warp_id * NUM_ROW_PER_WARP_2 + lane_id / NUM_THREAD_PER_ROW_2 + (id - 1) * TMA_LOAD_ONCE], __float2half(tmp));
+    //         }
+    //     } else {
+    //         if (tid == 0) {
+    //             cde::cp_async_bulk_tensor_2d_global_to_shared(&weight_o, &tensor_map_weight_o, cluster_block_id * DIM_PER_BLOCK + id * TMA_LOAD_ONCE, head_id * HEAD_DIM, bar);
+    //             token[id % 2] = cuda::device::barrier_arrive_tx(bar, 1, sizeof(weight_o));
+    //         } else {
+    //             token[id % 2] = bar.arrive();
+    //         }
+    //         bar_buffer.wait(std::move(token[(id - 1) % 2]));
+    //         tmp = 0.0;
+    //         for (int j = 0; j < HEAD_DIM; j+=NUM_PER_ROW_2) {
+    //             *(uint4*)(&reg_input[0]) = *(uint4*)(&local_output[input_idx + j]);
+    //             *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight_o_buffer[input_idx + j][weight_idx]);
+    //             #pragma unroll
+    //             for (int d = 0; d < NUM_PER_THREAD; d++) {
+    //                 tmp += __half2float(reg_input[d] * reg_weight[d]);
+    //             }
+    //         }
+    //         #pragma unroll
+    //         for (int mask = (NUM_THREAD_PER_ROW_2 >> 1); mask > 0; mask >>= 1) {
+    //             tmp += __shfl_down_sync(0xffffffff, tmp, mask);
+    //         }
+    //         if (lane_id % NUM_THREAD_PER_ROW_2 == 0) {
+    //             // atomicAdd(&global_reduce[cluster_block_id * DIM_PER_BLOCK + warp_id * NUM_ROW_PER_WARP_2 + lane_id / NUM_THREAD_PER_ROW_2 + (id - 1) * TMA_LOAD_ONCE], __float2half(tmp));
+    //         }
+    //     }
+    // }
+    // bar_buffer.wait(std::move(token[((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) % 2]));
+    // tmp = 0.0;
+    // for (int j = 0; j < HEAD_DIM; j+=NUM_PER_ROW_2) {
+    //     *(uint4*)(&reg_input[0]) = *(uint4*)(&local_output[input_idx + j]);
+    //     *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight_o[input_idx + j][weight_idx]);
+    //     #pragma unroll
+    //     for (int d = 0; d < NUM_PER_THREAD; d++) {
+    //         tmp += __half2float(reg_input[d] * reg_weight[d]);
+    //     }
+    // }
+    // #pragma unroll
+    // for (int mask = (NUM_THREAD_PER_ROW_2 >> 1); mask > 0; mask >>= 1) {
+    //     tmp += __shfl_down_sync(0xffffffff, tmp, mask);
+    // }
+    // if (lane_id % NUM_THREAD_PER_ROW_2 == 0) {
+    //     // atomicAdd(&global_reduce[cluster_block_id * DIM_PER_BLOCK + warp_id * NUM_ROW_PER_WARP_2 + lane_id / NUM_THREAD_PER_ROW_2 + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE], __float2half(tmp));
     // }
     // cluster.sync();
 
@@ -994,7 +1050,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     // }
 
     // // Compute up proj
-    // __shared__ __align__(16) half local_output_up[HEAD_DIM];
+    // 
     // tmp = 0.0;
     // for (int i = 0; i < FFN_DIM_PER_BLOCK; i+=NUM_PER_ROW) { // 16
     //     *(uint4*)(&reg_input[0][0]) = *(uint4*)(&input_shmem[input_idx + i]);
@@ -1098,12 +1154,13 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
 
 int main(int argc, char** argv) {
     cudaFuncSetAttribute(single_decode, cudaFuncAttributeNonPortableClusterSizeAllowed, 16);
-    uint32_t max_shmem_size = sizeof(half) * TMA_LOAD_ONCE * HEAD_DIM * 4;
+    uint32_t max_shmem_size = DIM_PER_BLOCK * sizeof(half) + NUM_WARPS * sizeof(float) + 3 * HEAD_DIM * sizeof(half) + 2 * TMA_LOAD_ONCE * HEAD_DIM * sizeof(half) + KV_DIM_PER_BLOCK * sizeof(half) + 127 & ~127;
     cudaFuncSetAttribute(single_decode, cudaFuncAttributeMaxDynamicSharedMemorySize, max_shmem_size);
 
     half *h_input, *d_input;
     half *h_kv_cache, *d_kv_cache;
-    half *h_w_qkvo, *d_w_qkvo;
+    half *h_w_qkv, *d_w_qkv;
+    half *h_w_o, *d_w_o;
     half *h_ffn_gate, *d_ffn_gate;
     half *h_ffn_down, *d_ffn_down;
     half *h_ffn_up, *d_ffn_up;
@@ -1112,7 +1169,8 @@ int main(int argc, char** argv) {
     float *h_cos, *d_cos;
     float *h_sin, *d_sin;
     h_input = new half[1 * HIDDEN_DIM];
-    h_w_qkvo = new half[4 * HIDDEN_DIM * HIDDEN_DIM];
+    h_w_qkv = new half[3 * HIDDEN_DIM * HIDDEN_DIM];
+    h_w_o = new half[HIDDEN_DIM * HIDDEN_DIM];
     h_kv_cache = new half[2 * SEQ_LEN * HEAD_NUM * HEAD_DIM];
     h_ffn_gate = new half[HIDDEN_DIM * FFN_DIM];
     h_ffn_up = new half[HIDDEN_DIM * FFN_DIM];
@@ -1123,7 +1181,8 @@ int main(int argc, char** argv) {
     h_sin = new float[HEAD_DIM];
 
     fill_matrix(h_input, 1 * HIDDEN_DIM);
-    fill_matrix(h_w_qkvo, 4 * HIDDEN_DIM * HIDDEN_DIM);
+    fill_matrix(h_w_qkv, 3 * HIDDEN_DIM * HIDDEN_DIM);
+    fill_matrix(h_w_o, HIDDEN_DIM * HIDDEN_DIM);
     fill_matrix(h_kv_cache, 2 * SEQ_LEN * HEAD_NUM * HEAD_DIM);
     fill_matrix(h_ffn_gate, HIDDEN_DIM * FFN_DIM);
     fill_matrix(h_ffn_down, FFN_DIM * HIDDEN_DIM);
@@ -1142,7 +1201,8 @@ int main(int argc, char** argv) {
     }
 
     cudaMalloc(reinterpret_cast<void**>(&d_input), sizeof(half) * 1 * HIDDEN_DIM);
-    cudaMalloc(reinterpret_cast<void**>(&d_w_qkvo), sizeof(half) * 4 * HIDDEN_DIM * HIDDEN_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_w_qkv), sizeof(half) * 3 * HIDDEN_DIM * HIDDEN_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_w_o), sizeof(half) * HIDDEN_DIM * HIDDEN_DIM);
     cudaMalloc(reinterpret_cast<void**>(&d_kv_cache), sizeof(half) * 2 * SEQ_LEN * HEAD_NUM * HEAD_DIM);
     cudaMalloc(reinterpret_cast<void**>(&d_ffn_gate), sizeof(half) * HIDDEN_DIM * FFN_DIM);
     cudaMalloc(reinterpret_cast<void**>(&d_ffn_down), sizeof(half) * FFN_DIM * HIDDEN_DIM);
@@ -1153,7 +1213,8 @@ int main(int argc, char** argv) {
     cudaMalloc(reinterpret_cast<void**>(&d_sin), sizeof(float) * HEAD_DIM);
 
     cudaMemcpy(reinterpret_cast<void*>(d_input), h_input, sizeof(half) * 1 * HIDDEN_DIM, cudaMemcpyHostToDevice);
-    cudaMemcpy(reinterpret_cast<void*>(d_w_qkvo), h_w_qkvo, sizeof(half) * 4 * HIDDEN_DIM * HIDDEN_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_w_qkv), h_w_qkv, sizeof(half) * 3 * HIDDEN_DIM * HIDDEN_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_w_o), h_w_o, sizeof(half) * HIDDEN_DIM * HIDDEN_DIM, cudaMemcpyHostToDevice);
     cudaMemcpy(reinterpret_cast<void*>(d_kv_cache), h_kv_cache, sizeof(half) * 2 * SEQ_LEN * HEAD_NUM * HEAD_DIM, cudaMemcpyHostToDevice);
     cudaMemcpy(reinterpret_cast<void*>(d_ffn_gate), h_ffn_gate, sizeof(half) * HIDDEN_DIM * FFN_DIM, cudaMemcpyHostToDevice);
     cudaMemcpy(reinterpret_cast<void*>(d_ffn_down), h_ffn_down, sizeof(half) * FFN_DIM * HIDDEN_DIM, cudaMemcpyHostToDevice);
@@ -1172,9 +1233,10 @@ int main(int argc, char** argv) {
 
     CUtensorMap tensor_map_weight{};
     CUtensorMap tensor_map_kv_cache{};
+    CUtensorMap tensor_map_weight_o{};
     // rank is the number of dimensions of the array.
     constexpr uint32_t rank = 2;
-    uint64_t size[rank] = {HIDDEN_DIM, 4 * HIDDEN_DIM};
+    uint64_t size[rank] = {HIDDEN_DIM, 3 * HIDDEN_DIM};
     // The stride is the number of bytes to traverse from the first element of one row to the next.
     // It must be a multiple of 16.
     uint64_t stride[rank - 1] = {HIDDEN_DIM * sizeof(half)};
@@ -1190,7 +1252,7 @@ int main(int argc, char** argv) {
         &tensor_map_weight,                // CUtensorMap *tensorMap,
         CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_FLOAT16,
         rank,                       // cuuint32_t tensorRank,
-        d_w_qkvo,                 // void *globalAddress,
+        d_w_qkv,                 // void *globalAddress,
         size,                       // const cuuint64_t *globalDim,
         stride,                     // const cuuint64_t *globalStrides,
         box_size,                   // const cuuint32_t *boxDim,
@@ -1208,16 +1270,9 @@ int main(int argc, char** argv) {
     );
 
     uint64_t size_kv_cache[rank] = {HIDDEN_DIM, 2 * SEQ_LEN};
-    // The stride is the number of bytes to traverse from the first element of one row to the next.
-    // It must be a multiple of 16.
     uint64_t stride_kv_cache[rank - 1] = {HIDDEN_DIM * sizeof(half)};
-    // The box_size is the size of the shared memory buffer that is used as the
-    // destination of a TMA transfer.
     uint32_t box_size_kv_cache[rank] = {HEAD_DIM, TMA_LOAD_ONCE};
-    // The distance between elements in units of sizeof(element). A stride of 2
-    // can be used to load only the real component of a complex-valued tensor, for instance.
     uint32_t elem_stride_kv_cache[rank] = {1, 1};
-
 
     // Create the tensor descriptor.
     CUresult res_kv_cache = cuTensorMapEncodeTiled(
@@ -1241,6 +1296,33 @@ int main(int argc, char** argv) {
         CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
     );
 
+    uint64_t size_weight_o[rank] = {HIDDEN_DIM, HIDDEN_DIM};
+    uint64_t stride_weight_o[rank - 1] = {HIDDEN_DIM * sizeof(half)};
+    uint32_t box_size_weight_o[rank] = {TMA_LOAD_ONCE, HEAD_DIM};
+    uint32_t elem_stride_weight_o[rank] = {1, 1};
+
+    // Create the tensor descriptor.
+    CUresult res_weight_o = cuTensorMapEncodeTiled(
+        &tensor_map_weight_o,                // CUtensorMap *tensorMap,
+        CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_FLOAT16,
+        rank,                       // cuuint32_t tensorRank,
+        d_w_o,                 // void *globalAddress,
+        size_weight_o,                       // const cuuint64_t *globalDim,
+        stride_weight_o,                     // const cuuint64_t *globalStrides,
+        box_size_weight_o,                   // const cuuint32_t *boxDim,
+        elem_stride_weight_o,                // const cuuint32_t *elementStrides,
+        // Interleave patterns can be used to accelerate loading of values that
+        // are less than 4 bytes long.
+        CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
+        // Swizzling can be used to avoid shared memory bank conflicts.
+        CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
+        // L2 Promotion can be used to widen the effect of a cache-policy to a wider
+        // set of L2 cache lines.
+        CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
+        // Any element that is outside of bounds will be set to zero by the TMA transfer.
+        CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+    );
+
     dim3 grid(HEAD_NUM * CLUSTER_SIZE); 
     dim3 block(BLOCK_SIZE);
 
@@ -1250,7 +1332,7 @@ int main(int argc, char** argv) {
         single_decode<<<grid, block, max_shmem_size>>>(
             d_output,
             d_input,
-            d_w_qkvo,
+            d_w_qkv,
             d_kv_cache,
             d_ffn_gate,
             d_ffn_down,
@@ -1261,7 +1343,8 @@ int main(int argc, char** argv) {
             d_cos,
             d_sin,
             tensor_map_weight,
-            tensor_map_kv_cache
+            tensor_map_kv_cache,
+            tensor_map_weight_o
         );
     }
     cudaError_t err = cudaGetLastError();
@@ -1278,7 +1361,7 @@ int main(int argc, char** argv) {
         single_decode<<<grid, block, max_shmem_size>>>(
             d_output,
             d_input,
-            d_w_qkvo,
+            d_w_qkv,
             d_kv_cache,
             d_ffn_gate,
             d_ffn_down,
@@ -1289,7 +1372,8 @@ int main(int argc, char** argv) {
             d_cos,
             d_sin,
             tensor_map_weight,
-            tensor_map_kv_cache
+            tensor_map_kv_cache,
+            tensor_map_weight_o
         );
     }
     cudaEventRecord(ed);
