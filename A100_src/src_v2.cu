@@ -69,18 +69,6 @@ void fill_matrix(T *mat, int sz) {
         }
     }
 }
-__device__ half dot(
-        half *A,
-        half *B,
-        int len
-) {
-    half res = __float2half(0.0f);
-#pragma unroll
-    for (int i = 0; i < len; i++) {
-        res += __hmul(A[i], B[i]);
-    }
-    return res;
-}
 
 /**
  * @param output
@@ -434,7 +422,6 @@ __device__ half dot(
     for (int i = 0; i < ATTN_TILE_LENGTH; ++i) {
         embedding_reg[i] = __hdiv(embedding_reg[i], current_l);
     }
-    __syncthreads();
     // #------------------------------------------------------------------------
     // now, for each warp, embedding_reg contains a tile of attn value
 
@@ -474,7 +461,7 @@ __device__ half dot(
     grid.sync();
     // #------------------------------------------------------------------------
     // now, attention value of each head is written in global
-    // [NOTE] Latency: 0.34857
+    // [NOTE] Latency: 0.426916 ms
 
     // #------------------------------------------------------------------------
     // # Residual
@@ -541,7 +528,7 @@ __device__ half dot(
         }
     }
     // #------------------------------------------------------------------------
-    // [NOTE] Latency: 0.356086 
+    // [NOTE] Latency: 0.43777 ms
 
     // #------------------------------------------------------------------------
     // # FFN
@@ -608,6 +595,7 @@ __device__ half dot(
         shared_HEAD_DIM0[tid] = __hmul(tmp, local2);
     }
     __syncthreads();
+    // [NOTE] Latency: 0.543662 ms
 
     // ffn 2
     __align__(16) half accumulate[EMBEDDING_TILE_LENGTH] = {};
@@ -625,13 +613,14 @@ __device__ half dot(
         }
     }
     #pragma unroll
-    for (int di = 0; di < EMBEDDING_TILE_LENGTH  / 8; ++di) {
+    for (int di = 0; di < EMBEDDING_TILE_LENGTH / 8; ++di) {
         *(uint4 * )(&global_reduction[
                 batch_idx * HEAD_NUM * EMBEDDING_DIM + head_idx * EMBEDDING_DIM + tid * EMBEDDING_TILE_LENGTH + 8 * di
             ]) = *(uint4 * )(&accumulate[8 * di]);
     }
     grid.sync();
     // #------------------------------------------------------------------------
+    // [NOTE] Latency: 0.573491 ms
 
     // #------------------------------------------------------------------------
     // # Reduce and Residual
@@ -656,11 +645,11 @@ __device__ half dot(
             }
         }
         #pragma unroll
-        for (int di = 0; di < EMBEDDING_TILE_LENGTH  / 8; ++di) {
+        for (int di = 0; di < EMBEDDING_TILE_LENGTH / 8; ++di) {
             *(uint4 * )(&output[batch_idx * EMBEDDING_DIM + tid * EMBEDDING_TILE_LENGTH + 8 * di]) = *(uint4 * )(&embedding_reg[8 * di]);
         }
     }
-    // [NOTE] Latency: 0.504136 ms
+    // [NOTE] Latency: 0.579748 ms
 }
 
 int main(int argc, char **argv) {
