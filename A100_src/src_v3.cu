@@ -99,16 +99,19 @@ void fill_matrix_from_file(T *mat, int sz, const std::string& filename) {
 #define GEMV_VECTOR_SIZE EMBEDDING_TILE_LENGTH
 #define GEMV_CHUNK_X HEAD_DIM
 #define GEMV_CHUNK_Y 64
+#define ATTN_PROJ_GEMV_CHUNK_X 64
+#define ATTN_PROJ_GEMV_CHUNK_Y HEAD_DIM
 
 #define ATTN_TILE_LENGTH_IN_BLOCK (SEQ_LEN / FAKE_CLUSTER_SIZE) // flash decoding split
 #define ATTN_ITER_LENGTH 1024 // flash attention split
 
-#define BLOCK_SHARED_HALF MAX(2*GEMV_CHUNK_X*GEMV_CHUNK_Y + HEAD_DIM * 2 + ATTN_ITER_LENGTH, FAKE_CLUSTER_SIZE*HEAD_DIM + 8)
-#define GLOBAL_REDUCE_HALF (3*FAKE_CLUSTER_NUM*FAKE_CLUSTER_SIZE*HEAD_DIM)
+#define BLOCK_SHARED_HALF MAX(2*ATTN_PROJ_GEMV_CHUNK_X*ATTN_PROJ_GEMV_CHUNK_Y + HEAD_DIM + EMBEDDING_TILE_LENGTH, MAX(2*GEMV_CHUNK_X*GEMV_CHUNK_Y + HEAD_DIM * 2 + ATTN_ITER_LENGTH, FAKE_CLUSTER_SIZE*HEAD_DIM + 8))
+#define GLOBAL_REDUCE_HALF MAX(3*FAKE_CLUSTER_NUM*FAKE_CLUSTER_SIZE*HEAD_DIM, HEAD_NUM*EMBEDDING_DIM+((EMBEDDING_DIM / FAKE_CLUSTER_SIZE / (64 * WARP_NUMBER))*2))
 
 __device__ void rms_norm(
     half* embedding_reg, // local
     half *w_rms, // global
+    uint32_t reduct_number, // `reduct_number` of partial sums are stored in `global_float_reduction`
     float* block_reduce_float, // shared
     float* global_float_reduction // global
 ) {
@@ -120,40 +123,14 @@ __device__ void rms_norm(
     const uint32_t lane_id = tid % WARP_SIZE; // 32 per warp
     const uint32_t warp_id = tid / WARP_SIZE;
 
-    float local_tmp_float = 0.0f;
-    #pragma unroll
-    for (int di = 0; di < EMBEDDING_TILE_IN_THREAD; di++) {
-        local_tmp_float += __half2float(embedding_reg[di]) * __half2float(embedding_reg[di]);
-    }
-    // block reduce
-    #pragma unroll
-    for (int stride = WARP_SIZE/2; stride > 0; stride >>= 1) {
-        local_tmp_float += __shfl_down_sync(0xffffffff, local_tmp_float, stride);
-    }
-    if (lane_id == 0) {
-        block_reduce_float[warp_id] = local_tmp_float;
-    }
-    __syncthreads();
-    if (warp_id == 0) {
-        if (lane_id < WARP_NUMBER) {
-            local_tmp_float = block_reduce_float[lane_id];
-        }
-        #pragma unroll
-        for (int stride = WARP_NUMBER/2; stride > 0; stride >>= 1) {
-            local_tmp_float += __shfl_down_sync(0xffffffff, local_tmp_float, stride);
-        }
-        if (lane_id == 0){
-            global_float_reduction[FAKE_CLUSTER_NUM * FAKE_CLUSTER_SIZE + block_idx_in_cluster] = local_tmp_float;
-        }
-    }
+    float local_tmp_float;
     // global reduce
-    grid.sync();
     if (warp_id == 0) {
-        if (lane_id < FAKE_CLUSTER_SIZE) {
-            local_tmp_float = global_float_reduction[FAKE_CLUSTER_NUM * FAKE_CLUSTER_SIZE + lane_id];
+        if (lane_id < reduct_number) {
+            local_tmp_float = global_float_reduction[lane_id];
         }
         #pragma unroll
-        for (int stride = FAKE_CLUSTER_SIZE/2; stride > 0; stride >>= 1) {
+        for (int stride = reduct_number/2; stride > 0; stride >>= 1) {
             local_tmp_float += __shfl_down_sync(0xffffffff, local_tmp_float, stride);
         }
         if (lane_id == 0){
@@ -169,7 +146,7 @@ __device__ void rms_norm(
     }
     #pragma unroll
     for (int di = 0; di < EMBEDDING_TILE_IN_THREAD; di++) {
-        embedding_reg[di] = __hmul(__hmul(embedding_reg[di], local_tmp_float), weight_reg[di]);
+        embedding_reg[di] = __hmul(__hmul(embedding_reg[di], __float2half(local_tmp_float)), weight_reg[di]);
     }
 }
 
@@ -312,6 +289,7 @@ __global__ void single_decode(
     __shared__ __align__(16) float block_reduce_float[WARP_NUMBER];
     __shared__ __align__(16) half block_shared_half[BLOCK_SHARED_HALF];
     __shared__ __align__(16) half shared_vector[GEMV_VECTOR_SIZE];
+    __shared__ __align__(16) half shared_embedding_tile[EMBEDDING_TILE_LENGTH]; // residual
     
     // #------------------------------------------------------------------------
     // # RMS Norm
@@ -320,8 +298,38 @@ __global__ void single_decode(
     #pragma unroll
     for (int di = 0; di < EMBEDDING_TILE_IN_THREAD / 8; di++) {
         *(uint4 * )(&embedding_reg[8 * di]) = *(uint4 * )(&input[block_idx_in_cluster * EMBEDDING_TILE_LENGTH + tid * EMBEDDING_TILE_IN_THREAD + 8 * di]);
+        *(uint4 * )(&shared_embedding_tile[tid * EMBEDDING_TILE_IN_THREAD + 8 * di]) = *(uint4 * )(&embedding_reg[8 * di]);
     }
-    rms_norm(embedding_reg, w_rms_input, block_reduce_float, global_float_reduction);
+    if (head_idx == 0) {
+        float local_tmp_float = 0.0f;
+        #pragma unroll
+        for (int di = 0; di < EMBEDDING_TILE_IN_THREAD; di++) {
+            local_tmp_float += __half2float(embedding_reg[di]) * __half2float(embedding_reg[di]);
+        }
+        // block reduce
+        #pragma unroll
+        for (int stride = WARP_SIZE/2; stride > 0; stride >>= 1) {
+            local_tmp_float += __shfl_down_sync(0xffffffff, local_tmp_float, stride);
+        }
+        if (lane_id == 0) {
+            block_reduce_float[warp_id] = local_tmp_float;
+        }
+        __syncthreads();
+        if (warp_id == 0) {
+            if (lane_id < WARP_NUMBER) {
+                local_tmp_float = block_reduce_float[lane_id];
+            }
+            #pragma unroll
+            for (int stride = WARP_NUMBER/2; stride > 0; stride >>= 1) {
+                local_tmp_float += __shfl_down_sync(0xffffffff, local_tmp_float, stride);
+            }
+            if (lane_id == 0){
+                global_float_reduction[block_idx_in_cluster] = local_tmp_float;
+            }
+        }
+    }
+    grid.sync();
+    rms_norm(embedding_reg, w_rms_input, FAKE_CLUSTER_SIZE, block_reduce_float, global_float_reduction);
     // store to shared memory
     #pragma unroll
     for (int di = 0; di < EMBEDDING_TILE_IN_THREAD / 8; di++) {
@@ -636,7 +644,6 @@ __global__ void single_decode(
         );
         // update attention output
         for (int ii = tid; ii < HEAD_DIM; ii += BLOCK_SIZE) { // tid < BLOCK_SIZE
-            // shared_o_ptr[ii] = __float2half(sum / current_l);
             shared_o_ptr[ii] = __float2half(__half2float(shared_o_ptr[ii]) * exp(prev_m - current_m) + sum);
         }
         prev_m = current_m;
@@ -646,7 +653,7 @@ __global__ void single_decode(
     // # ~~~ global_reduction ~~~
     // # |  attn value (FAKE_CLUSTER_NUM*FAKE_CLUSTER_SIZE*HEAD_DIM)  |  partial max:l (FAKE_CLUSTER_NUM*FAKE_CLUSTER_SIZE*2)  |
     // # ~~~~~~~~~~~~~~~~~~~~~~~~
-    half* global_attn_value = &global_reduction[head_idx*FAKE_CLUSTER_SIZE*HEAD_DIM + block_idx_in_cluster*HEAD_DIM];
+    half* global_attn_value = &global_reduction[head_idx*FAKE_CLUSTER_SIZE*HEAD_DIM];
     half* global_partial = &global_reduction[FAKE_CLUSTER_NUM*FAKE_CLUSTER_SIZE*HEAD_DIM+head_idx*FAKE_CLUSTER_SIZE*2];
     if (tid == 0) {
         global_partial[2*block_idx_in_cluster] = __float2half(current_m);
@@ -656,72 +663,191 @@ __global__ void single_decode(
     if(warp_id == 0) {
         #pragma unroll
         for(int ii = 0; ii < HEAD_DIM/WARP_SIZE/2; ++ii) {
-            *(__half2 * )(&global_attn_value[ii * WARP_SIZE * 2 + lane_id * 2]) = *(__half2 * )(&shared_o_ptr[ii * WARP_SIZE * 2 + lane_id * 2]);
+            *(__half2 * )(&global_attn_value[block_idx_in_cluster*HEAD_DIM + ii * WARP_SIZE * 2 + lane_id * 2]) = *(__half2 * )(&shared_o_ptr[ii * WARP_SIZE * 2 + lane_id * 2]);
         }
     }   
     grid.sync(); 
     // # ~~~ block_shared_half ~~~
     // # |  partial attn value (FAKE_CLUSTER_SIZE*HEAD_DIM)  |  max  |  l  |  scale factor(FAKE_CLUSTER_SIZE)  |
     // # ~~~~~~~~~~~~~~~~~~~~~~~~~
-    if(block_idx_in_cluster == 0) {
-        half* local_max = &block_shared_half[FAKE_CLUSTER_SIZE*HEAD_DIM];
-        half* local_l = &block_shared_half[FAKE_CLUSTER_SIZE*HEAD_DIM + 1];
-        half* local_scale_factors = &block_shared_half[FAKE_CLUSTER_SIZE*HEAD_DIM + 2];
-        // async load partial attention into shared memory (warp_id > 0)
-        if (warp_id > 0) { // thread_per_row = (HEAD_DIM >> 3) = 16;
-            uint32_t smem_ptr;
-            uint32_t column_id = ((lane_id % (HEAD_DIM >> 3)) << 3);
-            for(int iter = warp_id - 1; iter < FAKE_CLUSTER_SIZE/(WARP_SIZE/(HEAD_DIM>>3)); iter += (WARP_NUMBER-1)) {
-                uint32_t row_id = lane_id / (HEAD_DIM >> 3) + iter * (WARP_SIZE/(HEAD_DIM>>3));
-                asm("{ .reg .u64 smem_ptr; cvta.to.shared.u64 smem_ptr, %1; cvt.u32.u64 %0, smem_ptr; }\n"
-                    : "=r"(smem_ptr)
-                    : "l"(&block_shared_half[column_id + HEAD_DIM * row_id]));
-                // 8 half
-                asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n" ::"r"(smem_ptr), // register
-                                "l"(&global_attn_value[column_id + HEAD_DIM * row_id]), // long
-                                "n"(16));
-            }
-            asm volatile("cp.async.commit_group;\n" ::);
-        } else if (tid == 0) {
-            __align__(16) half partial_values[FAKE_CLUSTER_SIZE*2];
-            #pragma unroll
-            for(int ii = 0; ii < FAKE_CLUSTER_SIZE/4; ++ii) {
-                *(uint4 * )(&partial_values[ii * 8]) = *(uint4 * )(&global_partial[ii * 8]);
-            }
-            current_l = 0;
-            #pragma unroll
-            for(int ii = 0; ii < FAKE_CLUSTER_SIZE; ++ii) {
-                current_m = max(current_m,__half2float(partial_values[ii*2]));
-            }
-            #pragma unroll
-            for(int ii = 0; ii < FAKE_CLUSTER_SIZE; ++ii) {
-                float scale_factor = exp(__half2float(partial_values[ii*2]) - current_m);
-                current_l +=  scale_factor * __half2float(partial_values[ii*2+1]);
-                local_scale_factors[ii] = __float2half(scale_factor);
-            }
-            local_max[0] = current_m;
-            local_l[0] = current_l;
+    // [NOTE]: to avoid global sync and extra global memory access, 
+    //      we chose to recompute attetion output reduction in each block of the same 'cluster'.
+    //      After the following steps, each block has an attention output of the corresponding head.
+    // // if(block_idx_in_cluster == 0) {
+    half* local_max = &block_shared_half[FAKE_CLUSTER_SIZE*HEAD_DIM];
+    half* local_l = &block_shared_half[FAKE_CLUSTER_SIZE*HEAD_DIM + 1];
+    half* local_scale_factors = &block_shared_half[FAKE_CLUSTER_SIZE*HEAD_DIM + 2];
+    // async load partial attention into shared memory (warp_id > 0)
+    if (warp_id > 0) { // thread_per_row = (HEAD_DIM >> 3) = 16;
+        uint32_t smem_ptr;
+        uint32_t column_id = ((lane_id % (HEAD_DIM >> 3)) << 3);
+        for(int iter = warp_id - 1; iter < FAKE_CLUSTER_SIZE/(WARP_SIZE/(HEAD_DIM>>3)); iter += (WARP_NUMBER-1)) {
+            uint32_t row_id = lane_id / (HEAD_DIM >> 3) + iter * (WARP_SIZE/(HEAD_DIM>>3));
+            asm("{ .reg .u64 smem_ptr; cvta.to.shared.u64 smem_ptr, %1; cvt.u32.u64 %0, smem_ptr; }\n"
+                : "=r"(smem_ptr)
+                : "l"(&block_shared_half[column_id + HEAD_DIM * row_id]));
+            // 8 half
+            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n" ::"r"(smem_ptr), // register
+                            "l"(&global_attn_value[column_id + HEAD_DIM * row_id]), // long
+                            "n"(16));
         }
+        asm volatile("cp.async.commit_group;\n" ::);
+    } else if (tid == 0) {
+        __align__(16) half partial_values[FAKE_CLUSTER_SIZE*2];
+        #pragma unroll
+        for(int ii = 0; ii < FAKE_CLUSTER_SIZE/4; ++ii) {
+            *(uint4 * )(&partial_values[ii * 8]) = *(uint4 * )(&global_partial[ii * 8]);
+        }
+        current_l = 0;
+        #pragma unroll
+        for(int ii = 0; ii < FAKE_CLUSTER_SIZE; ++ii) {
+            current_m = max(current_m,__half2float(partial_values[ii*2]));
+        }
+        #pragma unroll
+        for(int ii = 0; ii < FAKE_CLUSTER_SIZE; ++ii) {
+            float scale_factor = exp(__half2float(partial_values[ii*2]) - current_m);
+            current_l +=  scale_factor * __half2float(partial_values[ii*2+1]);
+            local_scale_factors[ii] = __float2half(scale_factor);
+        }
+        local_max[0] = current_m;
+        local_l[0] = current_l;
+    }
+    asm volatile("cp.async.wait_group %0;\n" ::"n"(0));
+    __syncthreads();
+    // reduce to shared memory
+    current_l = local_l[0];
+    for (int ii = tid; ii < HEAD_DIM; ii+=BLOCK_SIZE) {
+        float local_o = 0.0f;
+        for (int inner = 0; inner < FAKE_CLUSTER_SIZE; ++inner) {
+            local_o += __half2float(block_shared_half[HEAD_DIM*inner+ii])*__half2float(local_scale_factors[inner]);
+        }
+        block_shared_half[ii] = __float2half(local_o/current_l);
+    }
+    __syncthreads();
+        // // // store to global
+        // // if (warp_id < HEAD_DIM/(2*WARP_SIZE)) {
+        // //     *(__half2*)(&global_head_dim[
+        // //         head_idx * HEAD_DIM + (warp_id * WARP_SIZE + lane_id) * 2
+        // //     ]) = *(__half2*)(&block_shared_half[(warp_id * WARP_SIZE + lane_id) * 2]);
+        // // }
+    // // }
+    // // grid.sync();
+
+    // #------------------------------------------------------------------------
+    // # Attention Projection
+    // #------------------------------------------------------------------------
+    // # ~~~ block_shared_half ~~~
+    // # |  attn output of corresponding head (HEAD_DIM)  |  weight_buffer (2*ATTN_PROJ_GEMV_CHUNK_X*ATTN_PROJ_GEMV_CHUNK_Y) | proj result (EMBEDDING_TILE_LENGTH) |
+    // # ~~~~~~~~~~~~~~~~~~~~~~~~~
+    half* shared_weight_buffer_ptr = &block_shared_half[HEAD_DIM];
+    half* shared_projection_output = &block_shared_half[HEAD_DIM + 2*ATTN_PROJ_GEMV_CHUNK_X*ATTN_PROJ_GEMV_CHUNK_Y];
+    if(DEBUG && ATTN_PROJ_GEMV_CHUNK_Y != HEAD_DIM) {
+        printf("ATTN_PROJ_GEMV_CHUNK_Y = %d is incompatible with current impl!", ATTN_PROJ_GEMV_CHUNK_Y);
+    }
+    // header
+    load_half_matrix_to_shared_mem(
+        shared_weight_buffer_ptr, w_o, ATTN_PROJ_GEMV_CHUNK_X, ATTN_PROJ_GEMV_CHUNK_Y,
+        EMBEDDING_DIM, head_idx * HEAD_DIM, block_idx_in_cluster * EMBEDDING_TILE_LENGTH
+    );
+    asm volatile("cp.async.commit_group;\n" ::);
+    iter = 0;
+    for (; iter < (EMBEDDING_TILE_LENGTH / ATTN_PROJ_GEMV_CHUNK_X) - 1; ++iter){
         asm volatile("cp.async.wait_group %0;\n" ::"n"(0));
         __syncthreads();
-        // reduce to shared memory
-        current_l = local_l[0];
-        for (int ii = tid; ii < HEAD_DIM; ii+=BLOCK_SIZE) {
-            float local_o = 0.0f;
-            for (int inner = 0; inner < FAKE_CLUSTER_SIZE; ++inner) {
-                local_o += __half2float(block_shared_half[HEAD_DIM*inner+ii])*__half2float(local_scale_factors[inner]);
-            }
-            block_shared_half[ii] = __float2half(local_o/current_l);
+        load_half_matrix_to_shared_mem(
+            &shared_weight_buffer_ptr[(iter + 1)%2 * ATTN_PROJ_GEMV_CHUNK_X * ATTN_PROJ_GEMV_CHUNK_Y], 
+            w_o, ATTN_PROJ_GEMV_CHUNK_X, ATTN_PROJ_GEMV_CHUNK_Y,
+            EMBEDDING_DIM, head_idx * HEAD_DIM, block_idx_in_cluster * EMBEDDING_TILE_LENGTH + (iter + 1) * ATTN_PROJ_GEMV_CHUNK_X
+        );
+        asm volatile("cp.async.commit_group;\n" ::);
+
+        // calculate
+        sum = 0.0f;
+        gemv_tile(
+            block_shared_half, shared_weight_buffer_ptr, sum, iter%2, 
+            0, ATTN_PROJ_GEMV_CHUNK_X, ATTN_PROJ_GEMV_CHUNK_Y
+        );
+        if(tid < ATTN_PROJ_GEMV_CHUNK_X) {
+            shared_projection_output[tid + ATTN_PROJ_GEMV_CHUNK_X * iter] = __float2half(sum);
+        }
+    }
+    asm volatile("cp.async.wait_group %0;\n" ::"n"(0));
+    __syncthreads();
+    sum = 0.0f;
+    gemv_tile(
+        block_shared_half, shared_weight_buffer_ptr, sum, iter%2, 0, ATTN_PROJ_GEMV_CHUNK_X, ATTN_PROJ_GEMV_CHUNK_Y
+    );
+    if(tid < ATTN_PROJ_GEMV_CHUNK_X) {
+        shared_projection_output[tid + ATTN_PROJ_GEMV_CHUNK_X * iter] = __float2half(sum);
+    }
+    // store projection_output to global
+    __syncthreads();
+    for(int ii = 0; ii < EMBEDDING_TILE_LENGTH/BLOCK_SIZE/2; ++ii) {
+        *(__half2 * )(&global_reduction[
+            head_idx*EMBEDDING_DIM+block_idx_in_cluster*EMBEDDING_TILE_LENGTH+
+            ii*BLOCK_SIZE*2 + tid *2
+        ])=*(__half2 * )(&shared_projection_output[ii*BLOCK_SIZE*2 + tid *2]);
+    }
+    grid.sync();
+    // #------------------------------------------------------------------------
+    // # Reduction, Residual, RMS Norm
+    // #------------------------------------------------------------------------
+    // # ~~~ global_reduction ~~~
+    // # |  projection output (HEAD_NUM*EMBEDDING_DIM)  |  partial sum ((EMBEDDING_DIM / FAKE_CLUSTER_SIZE / (64 * WARP_NUMBER))*2) |
+    // # ~~~~~~~~~~~~~~~~~~~~~~~~~
+    float* global_partial_sums = reinterpret_cast<float*>(&global_reduction[HEAD_NUM*EMBEDDING_DIM]);
+    // use part of the 'clusters' to perform reduct + residual
+    if(head_idx < EMBEDDING_DIM / FAKE_CLUSTER_SIZE / (64 * WARP_NUMBER)) { // 4
+        __half2* shared_embedding_tile_half2_ptr = reinterpret_cast<__half2*>(shared_embedding_tile);
+        __half2* global_projection_half2_ptr = reinterpret_cast<__half2*>(global_reduction);
+        __half2 value = shared_embedding_tile_half2_ptr[(head_idx*64*WARP_NUMBER)/2 + tid];
+        for(int ii = 0; ii < HEAD_NUM; ++ii) {
+            value = __hadd2(value, global_projection_half2_ptr[(ii * EMBEDDING_DIM + block_idx_in_cluster * EMBEDDING_TILE_LENGTH + head_idx * 64 * WARP_NUMBER)/2 + tid]);
+        }
+        shared_embedding_tile_half2_ptr[tid] = value;
+        float tmp1 = __half2float(__low2half(value)), tmp2 = __half2float(__high2half(value));
+        float partial_sum = tmp1 * tmp1 + tmp2 *tmp2;
+        // sum: warp reduce
+        #pragma unroll
+        for (int stride = WARP_SIZE/2; stride > 0; stride >>= 1) {
+            partial_sum = partial_sum + __shfl_down_sync(0xffffffff, partial_sum, stride);
+        }
+        if(lane_id == 0) {
+            block_reduce_float[warp_id] = partial_sum;
         }
         __syncthreads();
         // store to global
-        if (warp_id < HEAD_DIM/(2*WARP_SIZE)) {
-            *(__half2*)(&global_head_dim[
-                head_idx * HEAD_DIM + (warp_id * WARP_SIZE + lane_id) * 2
-            ]) = *(__half2*)(&block_shared_half[(warp_id * WARP_SIZE + lane_id) * 2]);
+        if(tid < (BLOCK_SIZE*2)/8) {
+            *(uint4 * )(&output[block_idx_in_cluster * EMBEDDING_TILE_LENGTH + head_idx * 64 * WARP_NUMBER + tid * 8]) = *(uint4 * )(&shared_embedding_tile[tid * 8]); 
+        } else if(tid==(BLOCK_SIZE*2)/8) {
+            partial_sum = 0.0f;
+            #pragma unroll
+            for(int ii = 0; ii < WARP_NUMBER; ++ii) {
+                partial_sum += block_reduce_float[ii];
+            }
+            global_partial_sums[head_idx * FAKE_CLUSTER_SIZE + block_idx_in_cluster] = partial_sum;
+            printf("partial_sum %d %f\n", head_idx, partial_sum);
         }
     }
-    grid.sync();
+    grid.sync(); 
+    // now, `output` is written with attention output + residual
+    #pragma unroll
+    for (int di = 0; di < EMBEDDING_TILE_IN_THREAD / 8; di++) {
+        *(uint4 * )(&embedding_reg[8 * di]) = *(uint4 * )(&output[block_idx_in_cluster * EMBEDDING_TILE_LENGTH + tid * EMBEDDING_TILE_IN_THREAD + 8 * di]);
+        *(uint4 * )(&shared_embedding_tile[tid * EMBEDDING_TILE_IN_THREAD + 8 * di]) = *(uint4 * )(&embedding_reg[8 * di]);
+    }
+    rms_norm(embedding_reg, w_rms_attn, (EMBEDDING_DIM / (64 * WARP_NUMBER)), block_reduce_float, global_partial_sums);
+    // store to shared memory
+    #pragma unroll
+    for (int di = 0; di < EMBEDDING_TILE_IN_THREAD / 8; di++) {
+        *(uint4 * )(&shared_vector[tid * EMBEDDING_TILE_IN_THREAD + 8 * di]) = *(uint4 * )(&embedding_reg[8 * di]);
+    }
+    __syncthreads();
+    // #------------------------------------------------------------------------
+ 
+    // #------------------------------------------------------------------------
+    // # FFN
+    // #------------------------------------------------------------------------
     // TODO
 }
 
