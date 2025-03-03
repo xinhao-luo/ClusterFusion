@@ -9,8 +9,6 @@
 
 namespace cg = cooperative_groups;
 
-// nvcc -arch=sm_80 -std=c++17 src.cu -o test -Xptxas=-v -Xptxas=-warn-lmem-usage 
-
 std::mt19937 rng(42);
 std::normal_distribution<float> norm_dist(0.0, 0.1);
 
@@ -66,8 +64,7 @@ void fill_matrix_from_file(T *mat, int sz, const std::string& filename) {
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 #define DEBUG 1
-#define MISALIGNED 0
-#define USE_GEMV_T_V1 1
+#define MISALIGNED 0 // (shihan): Set this to 0 if you want better alignment with the current kernel on H100.
 
 /**
  * Decode config
@@ -83,7 +80,7 @@ void fill_matrix_from_file(T *mat, int sz, const std::string& filename) {
  * Kernel config
  */
 #define WARP_SIZE 32
-#define NUM_WARPS 4 // 4 8 16
+#define NUM_WARPS 4 
 #define BLOCK_SIZE (WARP_SIZE*NUM_WARPS)
 
 #define FAKE_CLUSTER_NUM HEAD_NUM // number of blocks working on a request (>HEAD_NUM)
@@ -364,6 +361,7 @@ __global__ void single_decode_kernel(
         for (int d = tid * 2; d < EMBEDDING_TILE_LENGTH; d+=BLOCK_SIZE * 2) { 
             *(half2*)(&reg_input_norm[0]) = *(half2*)(&input_shmem[d]);
             *(half2*)(&reg_input_norm[0]) = __hmul2(*(half2*)(&reg_input_norm[0]), {rms_rcp, rms_rcp});
+            // (shihan): The current H100 kernel uses `*(half2*)(&w_rms_input[d])`. Fix it if you consider it a bug.
             *(half2*)(&reg_weight_norm[0]) = *(half2*)(&w_rms_input[EMBEDDING_TILE_LENGTH * cluster_block_id + d]);
             *(half2*)(&input_shmem[d]) = __hmul2(*(half2*)(&reg_input_norm[0]), *(half2*)(&reg_weight_norm[0]));
         }
@@ -433,29 +431,25 @@ __global__ void single_decode_kernel(
     block.sync();
 
     // rope
-    if (MISALIGNED) {
-        // TODO
-    } else {
-        half2 q_rope, q_rope_1;
-        half2 k_rope, k_rope_1;
-        float2 cos_reg, sin_reg;
-        if (tid < HEAD_DIM / 2) {
-            q_rope = *(half2*)(&q_shmem[tid * 2]);
-            k_rope = *(half2*)(&kv_shmem[tid * 2]);
-            if (tid * 2 < HEAD_DIM / 2) {
-                q_rope_1 = *(half2*)(&q_shmem[HEAD_DIM / 2 + tid * 2]);
-                k_rope_1 = *(half2*)(&kv_shmem[HEAD_DIM / 2 + tid * 2]);
-                cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
-                sin_reg = {-sin[HEAD_DIM / 2 + tid * 2], -sin[HEAD_DIM / 2 + tid * 2 + 1]};
-            } else {
-                q_rope_1 = *(half2*)(&q_shmem[tid * 2 - HEAD_DIM / 2]);
-                k_rope_1 = *(half2*)(&kv_shmem[tid * 2 - HEAD_DIM / 2]);
-                cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
-                sin_reg = {sin[tid * 2 - HEAD_DIM / 2], sin[tid * 2 + 1 - HEAD_DIM / 2]};
-            }
-            *(half2*)(&q_shmem[tid * 2]) = __hadd2(__hmul2(q_rope, __float22half2_rn(cos_reg)), __hmul2(q_rope_1, __float22half2_rn(sin_reg)));
-            *(half2*)(&kv_shmem[tid * 2]) = __hadd2(__hmul2(k_rope, __float22half2_rn(cos_reg)), __hmul2(k_rope_1, __float22half2_rn(sin_reg)));
+    half2 q_rope, q_rope_1;
+    half2 k_rope, k_rope_1;
+    float2 cos_reg, sin_reg;
+    if (tid < HEAD_DIM / 2) {
+        q_rope = *(half2*)(&q_shmem[tid * 2]);
+        k_rope = *(half2*)(&kv_shmem[tid * 2]);
+        if (tid * 2 < HEAD_DIM / 2) {
+            q_rope_1 = *(half2*)(&q_shmem[HEAD_DIM / 2 + tid * 2]);
+            k_rope_1 = *(half2*)(&kv_shmem[HEAD_DIM / 2 + tid * 2]);
+            cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
+            sin_reg = {-sin[HEAD_DIM / 2 + tid * 2], -sin[HEAD_DIM / 2 + tid * 2 + 1]};
+        } else {
+            q_rope_1 = *(half2*)(&q_shmem[tid * 2 - HEAD_DIM / 2]);
+            k_rope_1 = *(half2*)(&kv_shmem[tid * 2 - HEAD_DIM / 2]);
+            cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
+            sin_reg = {sin[tid * 2 - HEAD_DIM / 2], sin[tid * 2 + 1 - HEAD_DIM / 2]};
         }
+        *(half2*)(&q_shmem[tid * 2]) = __hadd2(__hmul2(q_rope, __float22half2_rn(cos_reg)), __hmul2(q_rope_1, __float22half2_rn(sin_reg)));
+        *(half2*)(&kv_shmem[tid * 2]) = __hadd2(__hmul2(k_rope, __float22half2_rn(cos_reg)), __hmul2(k_rope_1, __float22half2_rn(sin_reg)));
     }
     block.sync();
     
@@ -788,7 +782,7 @@ __global__ void single_decode_kernel(
     // # FFN
     // #------------------------------------------------------------------------
     // TODO
-    
+    // (shihan): input_shmem contains the input 'x' of FFN. "output = down_proj(F.relu(gate_proj(x)) * up_proj(x))" to be implemented.   
 }
 
 int main(int argc, char **argv) { 
@@ -814,6 +808,7 @@ int main(int argc, char **argv) {
     h_rope_cos = new float[HEAD_DIM];
     h_rope_sin = new float[HEAD_DIM];
 
+    // (shihan): Replace this as you want.
     fill_matrix_from_file(h_input, HIDDEN_DIM, "data/h_input");
     fill_matrix_from_file(h_w_qkv, 3* HIDDEN_DIM * HIDDEN_DIM, "data/h_w_qkv");
     fill_matrix_from_file(h_w_o, HIDDEN_DIM * HIDDEN_DIM, "data/h_w_o");
@@ -847,12 +842,10 @@ int main(int argc, char **argv) {
     cudaMemcpy(reinterpret_cast<void *>(d_rope_cos), h_rope_cos, sizeof(float) * HEAD_DIM, cudaMemcpyHostToDevice);
     cudaMemcpy(reinterpret_cast<void *>(d_rope_sin), h_rope_sin, sizeof(float) * HEAD_DIM, cudaMemcpyHostToDevice);
 
-    half *h_output, *d_output;
-    h_output = new half[HIDDEN_DIM];
+    half *d_output;
     cudaMalloc(reinterpret_cast<void **>(&d_output), sizeof(half) * HIDDEN_DIM);
 
-    half *h_global_reduce, *global_reduce;
-    h_global_reduce = new half[GLOBAL_REDUCE_HALF];
+    half *global_reduce;
     cudaMalloc(reinterpret_cast<void **>(&global_reduce), sizeof(half) * GLOBAL_REDUCE_HALF);
 
     dim3 grid(FAKE_CLUSTER_NUM, FAKE_CLUSTER_SIZE);
@@ -872,45 +865,6 @@ int main(int argc, char **argv) {
     if (err != cudaSuccess) {
         std::cerr << "Kernel execution failed: " << cudaGetErrorString(err) << "\n";
     }
-
-    std::cout << "<<<<<<< output >>>>>>>\n";
-    cudaMemcpy(h_output, reinterpret_cast<void *>(d_output), 
-                sizeof(half) * HIDDEN_DIM,
-                cudaMemcpyDeviceToHost);
-    for (int i = 0; i < HIDDEN_DIM; ++i){
-        std::cout << __half2float(h_output[i]) << "\t";
-    }
-    std::cout << "\n";
-
-    std::cout << "<<<<<<< global reduce >>>>>>>\n";
-    cudaError_t err_ = cudaMemcpy(h_global_reduce, reinterpret_cast<void *>(global_reduce), 
-                sizeof(half) * GLOBAL_REDUCE_HALF, cudaMemcpyDeviceToHost);
-    if (err_ != cudaSuccess) {
-        std::cerr << "cudaMemcpy failed: " << cudaGetErrorString(err_) << "\n";
-    }
-
-    for (int i = 0; i < HEAD_NUM; ++i){
-        for (int j = 0; j < HIDDEN_DIM; ++j) {
-            std::cout << __half2float(h_global_reduce[i*HEAD_DIM+j]) << "\t";
-        }
-        std::cout << "\n=====\n";
-    }
-    // std::cout << "\n";
-    // for (int j = 0; j < HIDDEN_DIM; ++j) {
-    //     float sum = 0.0f;
-    //     for (int i = 0; i < HEAD_NUM; ++i){
-    //         sum += __half2float(h_global_reduce[i*HIDDEN_DIM+j]);
-    //     }
-    //     std::cout << sum << "\t";
-    // }
-    // std::cout << "\n";
-    // for (int i = 0; i < FAKE_CLUSTER_NUM*FAKE_CLUSTER_SIZE; ++i){
-    //     for (int j = 0; j < HEAD_DIM; ++j) {
-    //         std::cout << __half2float(h_global_reduce[(FAKE_CLUSTER_NUM*FAKE_CLUSTER_SIZE+i)*HEAD_DIM+j]) << "\t";
-    //     }
-    //     std::cout << "\n=====\n";
-    // }
-    // std::cout << "\n";
 
     return 0;
 }

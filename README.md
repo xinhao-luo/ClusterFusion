@@ -1,1 +1,1 @@
-
+Use `nvcc -arch=sm_80 -std=c++17 dummy_src.cu -o test` to compile `src/dummy_src.cu`.
