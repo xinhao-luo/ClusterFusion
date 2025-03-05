@@ -45,9 +45,9 @@ def test_batch_decode_with_paged_kv_cache(
         if kv_layout == "HND"
         else torch.randn(total_num_pages, 2, page_size, num_kv_heads, head_dim).to(0)
     ).to(kv_dtype)
-    kv_indptr = torch.arange(0, batch_size + 1).to(0).int() * num_pages_per_seq     #指向每个token所对应的kv page索引
+    kv_indptr = torch.arange(0, batch_size + 1).to(0).int() * num_pages_per_seq     
     kv_indices = torch.arange(0, total_num_pages).to(0).int()
-    kv_last_page_len = torch.full(             # 在最后一个page中kv 的长度
+    kv_last_page_len = torch.full(            
         (batch_size,), (kv_len - 1) % page_size + 1, dtype=torch.int32
     ).to(0)
 
@@ -68,52 +68,6 @@ def test_batch_decode_with_paged_kv_cache(
     time = timeit(wrapper.run, q, kv_data)* 1000. * 1000.
     return time
 
-def test_batch_decode_tensor_cores(
-    batch_size,
-    kv_len,
-    page_size,
-    num_kv_heads,
-    num_qo_heads,
-    head_dim,
-    kv_layout,
-    q_dtype,
-    kv_dtype,
-):
-    q = torch.randn(batch_size, num_qo_heads, head_dim).to(0).to(q_dtype)
-    num_pages_per_seq = (kv_len + page_size - 1) // page_size
-    total_num_pages = num_pages_per_seq * batch_size
-    kv_data = (
-        torch.randn(total_num_pages, 2, num_kv_heads, page_size, head_dim).to(0) / 10
-        if kv_layout == "HND"
-        else torch.randn(total_num_pages, 2, page_size, num_kv_heads, head_dim).to(0)
-        / 10
-    ).to(kv_dtype)
-    kv_indptr = torch.arange(0, batch_size + 1).to(0).int() * num_pages_per_seq
-    kv_indices = torch.arange(0, total_num_pages).to(0).int()
-    kv_last_page_len = torch.full(
-        (batch_size,), (kv_len - 1) % page_size + 1, dtype=torch.int32
-    ).to(0)
-
-    workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(0)
-
-    wrapper_tensor_cores = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-        workspace_buffer, kv_layout, use_tensor_cores=True
-    )
-    wrapper_tensor_cores.plan(
-        kv_indptr,
-        kv_indices,
-        kv_last_page_len,
-        num_qo_heads,
-        num_kv_heads,
-        head_dim,
-        page_size,
-        data_type=q_dtype,
-        q_data_type=kv_dtype,
-    )
-    
-    time = timeit(wrapper_tensor_cores.run, q, kv_data)* 1000. * 1000.
-    return time
-
 def main():
     # causal = True
     causal = False
@@ -129,8 +83,8 @@ def main():
 
     all_batch_configs.extend(itertools.product(
         # [1024, 4096, 8192, 16384],  # context_seqlen
-        [16384],  # context_seqlen
-        [16],  # num_requests  batch_size
+        [1024, 2048, 4096, 8192, 16384],  # context_seqlen
+        [1],  # num_requests  batch_size
         [1],  # query_seqlen
     ))
 
@@ -182,12 +136,10 @@ def main():
 
             # decode
             flashinfer_time = test_batch_decode_with_paged_kv_cache(num_requests,context_seqlen,16,nheads_kv,nheads_q,headdim,"NHD",dtype,dtype)
-            flashinfer_tensor_cores = test_batch_decode_tensor_cores(num_requests,context_seqlen,16,nheads_kv,nheads_q,headdim,"NHD",dtype,dtype)
 
             print(f'fa3_one_split: {fa3_time_one_split:.2f}us')
             print(f'fa3_heuristic: {fa3_time_heuristic:.2f}us')
             print(f'flashinfer: {flashinfer_time:.2f}us')
-            print(f'flashinfer_tensor_cores: {flashinfer_tensor_cores:.2f}us')
 
 if __name__ == "__main__":
     main()
