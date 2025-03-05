@@ -32,7 +32,7 @@ void fill_matrix(T* mat, int sz) {
     std::normal_distribution<float> norm_dist(0.0, 5.0);
     for (int i = 0; i < sz; i++) {
         if constexpr(std::is_same<T, half>::value) {
-            mat[i] = __float2half(0.01f);
+            mat[i] = __float2half(0.005f);
         }   
     }   
 }
@@ -889,8 +889,8 @@ int main(int argc, char** argv) {
     dim3 grid(HEAD_NUM * CLUSTER_SIZE); 
     dim3 block(BLOCK_SIZE);
 
-    int wmup = 100;
-    int test = 100;
+    int wmup = 1;
+    int test = 0;
     for (int i = 0; i < wmup; i++) {
         single_decode<<<grid, block>>>(
             d_output,
@@ -943,5 +943,7 @@ int main(int argc, char** argv) {
     cudaEventElapsedTime(&ms, st, ed);
     std::cout << "Latency: " << ms / test * 1e3 << " us" << std::endl;
     cudaMemcpy(h_output, reinterpret_cast<void*>(d_output), sizeof(half) * 1 * HIDDEN_DIM, cudaMemcpyDeviceToHost);
+    for (int i = 0; i < HIDDEN_DIM; i++)
+        printf("%f, ", __half2float(h_output[0]));
     return 0;
 }

@@ -1,0 +1,550 @@
+#include "cuda_runtime.h"                
+#include "cooperative_groups.h"
+#include "cuda_fp16.h"
+#include <cuda.h>    
+#include <cuda/barrier>
+#include <cudaTypedefs.h>
+using barrier = cuda::barrier<cuda::thread_scope_block>;
+namespace cde = cuda::device::experimental;
+#include <iostream>
+#include <random>
+#include <stdio.h>
+
+// nvcc --generate-code=arch=compute_90a,code=sm_90a -O3 -std=c++17 -lcuda tma.cu -o test && ./test
+
+#define HEAD_DIM 128    // attn head dimension
+#define HEAD_NUM 32     // attn head number
+#define FFN_DIM 4096 // ffn hidden dimension
+#define HIDDEN_DIM 4096 // token embedding dimension
+#define SEQ_LEN 4096    // sequence length
+
+#define NUM_WARPS 4
+#define WARP_SIZE 32
+#define BLOCK_SIZE (NUM_WARPS * WARP_SIZE) // 512
+#define CLUSTER_SIZE 4
+#define NUM_PER_THREAD 8
+#define NUM_ROW_PER_WARP (HEAD_DIM / NUM_WARPS) // 16
+#define NUM_THREAD_PER_ROW (WARP_SIZE / NUM_ROW_PER_WARP) // 2
+#define NUM_PER_ROW (NUM_PER_THREAD * NUM_THREAD_PER_ROW) // 16
+#define DIM_PER_BLOCK (HIDDEN_DIM / CLUSTER_SIZE) // 1024
+#define KV_DIM_PER_BLOCK (SEQ_LEN / CLUSTER_SIZE) // 
+#define FFN_DIM_PER_BLOCK (FFN_DIM / CLUSTER_SIZE) // 1024
+#define NUM_ROW_PER_WARP_2 (KV_DIM_PER_BLOCK / NUM_WARPS)
+#define NUM_ROW_PER_WARP_3 (DIM_PER_BLOCK / NUM_WARPS)
+#define NUM_ROW_PER_WARP_4 (FFN_DIM_PER_BLOCK / NUM_WARPS)
+
+#define TMA_LOAD_ONCE 64 // 32 64 128 256
+
+template <typename T>
+void fill_matrix(T* mat, int sz) {
+    std::random_device r;
+    std::mt19937 rng(r());
+    std::normal_distribution<float> norm_dist(0.0, 5.0);
+    for (int i = 0; i < sz; i++) {
+        if constexpr(std::is_same<T, half>::value) {
+            mat[i] = __float2half(norm_dist(rng));
+        }   
+    }   
+}
+
+__global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
+    half* output, // 1 * hidden_dim
+    half* input,  // 1 * hidden_dim
+    half* w_qkvo,    // 4 * hidden_dim * hidden_dim
+    half* k_cache,// head_num * seqlen * head_dim
+    half* v_cache,// head_num * seqlen * head_dim
+    half* ffn_gate,  // hidden_dim * ffn_dim
+    half* ffn_down,  // ffn_dim * hidden_dim
+    half* ffn_up,    // hidden_dim * ffn_dim
+    half* global_reduce,    // hidden_dim  
+    half* w_rms_input,// hidden_dim
+    half* w_rms_attn, // hidden_dim
+    float* cos,       // head_dim
+    float* sin,       // head_dim
+    const __grid_constant__ CUtensorMap tensor_map
+)
+{
+    namespace cg = cooperative_groups;
+    cg::grid_group grid             = cg::this_grid();
+    cg::cluster_group cluster       = cg::this_cluster();
+    cg::thread_block block          = cg::this_thread_block();
+    const uint32_t head_id          = grid.cluster_rank() % HEAD_NUM;
+    const uint32_t cluster_block_id = cluster.block_rank();
+    const uint32_t tid              = block.thread_rank();
+    const uint32_t lane_id = tid % WARP_SIZE; // 32 per warp
+    const uint32_t warp_id = tid / WARP_SIZE;
+
+    // Load input [1 x HIDDEN_DIM / CLUSTR_SIZE] to shared memory
+    __shared__ __align__(16) half input_shmem[DIM_PER_BLOCK];
+    #pragma unroll
+    for (int i = tid * 8; i < DIM_PER_BLOCK; i+=BLOCK_SIZE * 8) {
+        *(uint4*)(&input_shmem[i]) = *(uint4*)(&input[cluster_block_id * DIM_PER_BLOCK + i]);
+    }
+    block.sync();
+
+    // RMSNorm
+    __shared__ float reduction[NUM_WARPS];
+    float local_sum = 0;
+    __shared__ float cluster_local_sum;
+    half __align__(16) reg_input_norm[2], reg_weight_norm[2];
+    for (int d = tid * 2; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 2) { 
+        *(half2*)(&reg_input_norm[0]) = *(half2*)(&input_shmem[d]);
+        for (int di = 0; di < 2; di++)
+            local_sum += __half2float(reg_input_norm[di] * reg_input_norm[di]);
+    }
+    #pragma unroll
+    for (int mask = 16; mask > 0; mask >>= 1) {
+        local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
+    }
+    if (lane_id == 0){
+        reduction[warp_id] = local_sum;
+    }
+    block.sync(); 
+    if (tid < NUM_WARPS) 
+        local_sum = reduction[tid];
+    #pragma unroll
+    for (int mask = NUM_WARPS / 2; mask > 0; mask >>= 1) {
+        local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
+    } 
+    if (tid == 0)
+        cluster_local_sum = local_sum;
+    cluster.sync();
+    // Reduce through DSM
+    for (int i = 1; i < cluster.num_blocks() - 1; i++) {
+        if (tid == 0) {
+            local_sum = cluster_local_sum;
+            int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
+            float* dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);
+            atomicAdd(dst_shmem, local_sum);
+        }
+        cluster.sync();
+    }
+    float eps = 1e-5;
+    half rms_rcp = __float2half(1.f / (std::sqrt(cluster_local_sum / float(HIDDEN_DIM)) + eps));
+    for (int d = tid * 2; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 2) { 
+        *(half2*)(&reg_input_norm[0]) = *(half2*)(&input_shmem[d]);
+        *(half2*)(&reg_input_norm[0]) = __hmul2(*(half2*)(&reg_input_norm[0]), {rms_rcp, rms_rcp});
+        *(half2*)(&reg_weight_norm[0]) = *(half2*)(&w_rms_input[d]);
+        *(half2*)(&input_shmem[d]) = __hmul2(*(half2*)(&reg_input_norm[0]), *(half2*)(&reg_weight_norm[0]));
+    }
+    block.sync();
+
+    // For DSM reduce
+    __shared__ __align__(16) half local_buffer[HEAD_DIM];
+
+    // Compute hidden @ wq
+    float tmp = 0.0;
+    half __align__(16) reg_input[NUM_PER_THREAD];
+    half __align__(16) reg_weight[NUM_PER_THREAD];
+    __shared__ __align__(16) half local_q[HEAD_DIM];
+    __shared__ __align__(16) half local_kv[HEAD_DIM];
+    __shared__ alignas(128) half weight_qkv[TMA_LOAD_ONCE][HEAD_DIM];
+    // Initialize shared memory barrier with the number of threads participating in the barrier.
+    #pragma nv_diag_suppress static_var_with_dynamic_init
+    __shared__ barrier bar;
+    if (tid == 0) {
+        // Initialize barrier. All `blockDim.x` threads in block participate.
+        init(&bar, blockDim.x);
+        // Make initialized barrier visible in async proxy.
+        cde::fence_proxy_async_shared_cta();
+    }
+    // Syncthreads so initialized barrier is visible to all threads.
+    block.sync();
+
+    // Preload weight_q
+    barrier::arrival_token token;
+    // Compute input @ w_q
+    uint input_idx = (lane_id % NUM_THREAD_PER_ROW) * NUM_PER_THREAD;
+    uint weight_idx = warp_id * NUM_ROW_PER_WARP + lane_id / NUM_THREAD_PER_ROW;
+    for (int id = 0; id < DIM_PER_BLOCK / TMA_LOAD_ONCE; id++) {
+        if (tid == 0) {
+            // Initiate bulk tensor copy.
+            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight_qkv, &tensor_map, head_id * HEAD_DIM, cluster_block_id * DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar);
+            // Arrive on the barrier and tell how many bytes are expected to come in.
+            token = cuda::device::barrier_arrive_tx(bar, 1, sizeof(weight_qkv));
+        } else {
+            // Other threads just arrive.
+            token = bar.arrive();
+        }
+        bar.wait(std::move(token));
+        if (id == 0 && head_id == 0 && cluster_block_id == 0 && tid == 0) {
+            for (int i = 0; i < HEAD_DIM; i++)
+                printf("%f, ", __half2float(weight_qkv[0][i]));
+            printf("\n");
+        }
+            
+        for (int i = 0; i < TMA_LOAD_ONCE; i+=NUM_PER_ROW) { 
+            *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + i]);
+            #pragma unroll
+            for (int d = 0; d < NUM_PER_THREAD; d++) {
+                tmp += __half2float(reg_input[d] * weight_qkv[input_idx + i + d][weight_idx]);
+            }
+        }
+    }
+    #pragma unroll
+    for (int mask = (NUM_THREAD_PER_ROW >> 1); mask > 0; mask >>= 1) {
+        tmp += __shfl_down_sync(0xffffffff, tmp, mask);
+    }
+    if (lane_id % NUM_THREAD_PER_ROW == 0) {
+        local_q[warp_id * NUM_ROW_PER_WARP + lane_id / NUM_THREAD_PER_ROW] = __float2half(tmp);
+    }
+
+    // Preload weight_k
+    tmp = 0.0;
+    for (int id = 0; id < DIM_PER_BLOCK / TMA_LOAD_ONCE; id++) {
+        if (tid == 0) {
+            // Initiate bulk tensor copy.
+            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight_qkv, &tensor_map, head_id * HEAD_DIM, HIDDEN_DIM + cluster_block_id * DIM_PER_BLOCK + id * TMA_LOAD_ONCE, bar);
+            // Arrive on the barrier and tell how many bytes are expected to come in.
+            token = cuda::device::barrier_arrive_tx(bar, 1, sizeof(weight_qkv));
+        } else {
+            // Other threads just arrive.
+            token = bar.arrive();
+        }
+        bar.wait(std::move(token));
+        for (int i = 0; i < TMA_LOAD_ONCE; i+=NUM_PER_ROW) { 
+            *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + i]);
+            #pragma unroll
+            for (int d = 0; d < NUM_PER_THREAD; d++) {
+                tmp += __half2float(reg_input[d] * weight_qkv[input_idx + i + d][weight_idx]);
+            }
+        }
+    }
+    #pragma unroll
+    for (int mask = (NUM_THREAD_PER_ROW >> 1); mask > 0; mask >>= 1) {
+        tmp += __shfl_down_sync(0xffffffff, tmp, mask);
+    }
+    if (lane_id % NUM_THREAD_PER_ROW == 0) {
+        local_kv[warp_id * NUM_ROW_PER_WARP + lane_id / NUM_THREAD_PER_ROW] = __float2half(tmp);
+    }
+    block.sync();
+    // if(tid == 0)
+    //     printf("%f, %f \n", __half2float(local_q[0]), __half2float(local_kv[127]));
+
+    // Compute partial RoPE
+    half2 q_rope, q_rope_1;
+    half2 k_rope, k_rope_1;
+    float2 cos_reg, sin_reg;
+    if (tid < HEAD_DIM / 2) {
+        q_rope = *(half2*)(&local_q[tid * 2]);
+        k_rope = *(half2*)(&local_kv[tid * 2]);
+        if (tid * 2 < HEAD_DIM / 2) {
+            q_rope_1 = *(half2*)(&local_q[HEAD_DIM / 2 + tid * 2]);
+            k_rope_1 = *(half2*)(&local_kv[HEAD_DIM / 2 + tid * 2]);
+            cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
+            sin_reg = {-sin[HEAD_DIM / 2 + tid * 2], -sin[HEAD_DIM / 2 + tid * 2 + 1]};
+        } else {
+            q_rope_1 = *(half2*)(&local_q[tid * 2 - HEAD_DIM / 2]);
+            k_rope_1 = *(half2*)(&local_kv[tid * 2 - HEAD_DIM / 2]);
+            cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
+            sin_reg = {sin[tid * 2 - HEAD_DIM / 2], sin[tid * 2 + 1 - HEAD_DIM / 2]};
+        }
+        *(half2*)(&local_q[tid * 2]) = __hadd2(__hmul2(q_rope, __float22half2_rn(cos_reg)), __hmul2(q_rope_1, __float22half2_rn(sin_reg)));
+        *(half2*)(&local_kv[tid * 2]) = __hadd2(__hmul2(k_rope, __float22half2_rn(cos_reg)), __hmul2(k_rope_1, __float22half2_rn(sin_reg)));
+    }
+
+    uint32_t size = HEAD_DIM * sizeof(half);
+    __shared__ uint64_t barrier;
+    uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&barrier));
+
+    // Q reduce through DSM
+    for (int i = 1; i < cluster.num_blocks() - 1; i++) {
+        // Load neighbor block shmem data to this block's buffer within cluster
+        if (tid == 0) {
+            asm volatile (
+                "mbarrier.init.shared::cta.b64 [%0], %1;"
+                :
+                : "r"(bar_ptr), "r"(1)
+            );
+            asm volatile (
+                "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;"
+                :
+                : "r"(bar_ptr), "r"(size)
+            );
+        }
+        cluster.sync();
+        if (tid == 0) {
+            uint32_t src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_q));
+            uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_buffer));
+            uint32_t dst_cta = (cluster_block_id + i) % cluster.num_blocks();
+            uint32_t neighbor_dst_addr;
+            asm volatile (
+                "mapa.shared::cluster.u32 %0, %1, %2;\n"
+                : "=r"(neighbor_dst_addr)
+                : "r"(dst_addr), "r"(dst_cta)
+            );
+            uint32_t neighbor_dst_bar;
+            asm volatile (
+                "mapa.shared::cluster.u32 %0, %1, %2;\n"
+                : "=r"(neighbor_dst_bar)
+                : "r"(bar_ptr), "r"(dst_cta)
+            );
+            asm volatile (
+                "cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
+                :
+                :"r"(neighbor_dst_addr), "r"(src_addr), "r"(size), "r"(neighbor_dst_bar)
+                : "memory"
+            );
+        }
+        asm volatile (
+            "{\n"
+            ".reg .pred                P1;\n"
+            "LAB_WAIT:\n"
+            "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1;\n"
+            "@P1                       bra.uni DONE;\n"
+            "bra.uni                   LAB_WAIT;\n"
+            "DONE:\n"
+            "}\n"
+            :: "r"(bar_ptr),
+            "r"(0)
+        );
+
+        // Add
+        if (tid < HEAD_DIM / 2) {
+            half2 buffer = *(half2*)(&local_buffer[tid * 2]);
+            *(half2*)(&local_q[tid * 2]) = __hadd2(*(half2*)(&local_q[tid * 2]), buffer);
+        }
+        cluster.sync();
+    }
+    
+    // K reduce through DSM
+    for (int i = 1; i < cluster.num_blocks() - 1; i++) {
+        // Load neighbor block shmem data to this block's buffer within cluster
+        if (tid == 0) {
+            asm volatile (
+                "mbarrier.init.shared::cta.b64 [%0], %1;"
+                :
+                : "r"(bar_ptr), "r"(1)
+            );
+            asm volatile (
+                "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;"
+                :
+                : "r"(bar_ptr), "r"(size)
+            );
+        }
+        cluster.sync();
+        if (tid == 0) {
+            uint32_t src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_kv));
+            uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_buffer));
+            uint32_t dst_cta = (cluster_block_id + i) % cluster.num_blocks();
+            uint32_t neighbor_dst_addr;
+            asm volatile (
+                "mapa.shared::cluster.u32 %0, %1, %2;\n"
+                : "=r"(neighbor_dst_addr)
+                : "r"(dst_addr), "r"(dst_cta)
+            );
+            uint32_t neighbor_dst_bar;
+            asm volatile (
+                "mapa.shared::cluster.u32 %0, %1, %2;\n"
+                : "=r"(neighbor_dst_bar)
+                : "r"(bar_ptr), "r"(dst_cta)
+            );
+            asm volatile (
+                "cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
+                :
+                :"r"(neighbor_dst_addr), "r"(src_addr), "r"(size), "r"(neighbor_dst_bar)
+                : "memory"
+            );
+        }
+        asm volatile (
+            "{\n"
+            ".reg .pred                P1;\n"
+            "LAB_WAIT:\n"
+            "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1;\n"
+            "@P1                       bra.uni DONE;\n"
+            "bra.uni                   LAB_WAIT;\n"
+            "DONE:\n"
+            "}\n"
+            :: "r"(bar_ptr),
+            "r"(0)
+        );
+
+        // Add
+        if (tid < HEAD_DIM / 2) {
+            half2 buffer = *(half2*)(&local_buffer[tid * 2]);
+            *(half2*)(&local_kv[tid * 2]) = __hadd2(*(half2*)(&local_kv[tid * 2]), buffer);
+        }
+        cluster.sync();
+    }
+}
+
+int main(int argc, char** argv) {
+    cudaFuncSetAttribute(single_decode, cudaFuncAttributeNonPortableClusterSizeAllowed, 16);
+    uint32_t max_shmem_size = sizeof(half) * TMA_LOAD_ONCE * HEAD_DIM * 4;
+    cudaFuncSetAttribute(single_decode, cudaFuncAttributeMaxDynamicSharedMemorySize, max_shmem_size);
+
+    half *h_input, *d_input;
+    half *h_k_cache, *d_k_cache;
+    half *h_v_cache, *d_v_cache;
+    half *h_w_qkvo, *d_w_qkvo;
+    half *h_ffn_gate, *d_ffn_gate;
+    half *h_ffn_down, *d_ffn_down;
+    half *h_ffn_up, *d_ffn_up;
+    half *h_rms_input, *d_rms_input;
+    half *h_rms_attn, *d_rms_attn;
+    float *h_cos, *d_cos;
+    float *h_sin, *d_sin;
+    h_input = new half[1 * HIDDEN_DIM];
+    h_w_qkvo = new half[4 * HIDDEN_DIM * HIDDEN_DIM];
+    h_k_cache = new half[HEAD_NUM * SEQ_LEN * HEAD_DIM];
+    h_v_cache = new half[HEAD_NUM * SEQ_LEN * HEAD_DIM];
+    h_ffn_gate = new half[HIDDEN_DIM * FFN_DIM];
+    h_ffn_up = new half[HIDDEN_DIM * FFN_DIM];
+    h_ffn_down = new half[FFN_DIM * HIDDEN_DIM];
+    h_rms_input = new half[HIDDEN_DIM];
+    h_rms_attn = new half[HIDDEN_DIM];
+    h_cos = new float[HEAD_DIM];
+    h_sin = new float[HEAD_DIM];
+
+    fill_matrix(h_input, 1 * HIDDEN_DIM);
+    fill_matrix(h_w_qkvo, 4 * HIDDEN_DIM * HIDDEN_DIM);
+    fill_matrix(h_k_cache, HEAD_NUM * SEQ_LEN * HEAD_DIM);
+    fill_matrix(h_v_cache, HEAD_NUM * SEQ_LEN * HEAD_DIM);
+    fill_matrix(h_ffn_gate, HIDDEN_DIM * FFN_DIM);
+    fill_matrix(h_ffn_down, FFN_DIM * HIDDEN_DIM);
+    fill_matrix(h_ffn_up, HIDDEN_DIM * FFN_DIM);
+    fill_matrix(h_rms_input, HIDDEN_DIM);
+    fill_matrix(h_rms_attn, HIDDEN_DIM);
+
+    //
+    for (int i = 0; i < HEAD_DIM; i++) {
+        printf("%f, ", __half2float(h_w_qkvo[i]));
+    }
+    printf("\n");
+
+    // Init cos, sin used in RoPE
+    int encode_point_offset = 0;
+    float rope_scale = 1;
+    float rope_theta = 500000;
+    for (int j = 0; j < HEAD_DIM; j++) {
+        float inv_freq =(encode_point_offset / rope_scale) / (std::pow(rope_theta, float(2 * (j % (HEAD_DIM / 2))) / float(HEAD_DIM)));
+        h_cos[j] = std::cos(inv_freq);
+        h_sin[j] = std::sin(inv_freq);
+    }
+
+    cudaMalloc(reinterpret_cast<void**>(&d_input), sizeof(half) * 1 * HIDDEN_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_w_qkvo), sizeof(half) * 4 * HIDDEN_DIM * HIDDEN_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_k_cache), sizeof(half) * HEAD_NUM * SEQ_LEN * HEAD_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_v_cache), sizeof(half) * HEAD_NUM * SEQ_LEN * HEAD_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_ffn_gate), sizeof(half) * HIDDEN_DIM * FFN_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_ffn_down), sizeof(half) * FFN_DIM * HIDDEN_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_ffn_up), sizeof(half) * HIDDEN_DIM * FFN_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_rms_input), sizeof(half) * HIDDEN_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_rms_attn), sizeof(half) * HIDDEN_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_cos), sizeof(float) * HEAD_DIM);
+    cudaMalloc(reinterpret_cast<void**>(&d_sin), sizeof(float) * HEAD_DIM);
+
+    cudaMemcpy(reinterpret_cast<void*>(d_input), h_input, sizeof(half) * 1 * HIDDEN_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_w_qkvo), h_w_qkvo, sizeof(half) * 4 * HIDDEN_DIM * HIDDEN_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_k_cache), h_k_cache, sizeof(half) * HEAD_NUM * SEQ_LEN * HEAD_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_v_cache), h_v_cache, sizeof(half) * HEAD_NUM * SEQ_LEN * HEAD_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_ffn_gate), h_ffn_gate, sizeof(half) * HIDDEN_DIM * FFN_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_ffn_down), h_ffn_down, sizeof(half) * FFN_DIM * HIDDEN_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_ffn_up), h_ffn_up, sizeof(half) * HIDDEN_DIM * FFN_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_rms_input), h_rms_input, sizeof(half) * HIDDEN_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_rms_attn), h_rms_attn, sizeof(half) * HIDDEN_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_cos), h_cos, sizeof(float) * HEAD_DIM, cudaMemcpyHostToDevice);
+    cudaMemcpy(reinterpret_cast<void*>(d_sin), h_sin, sizeof(float) * HEAD_DIM, cudaMemcpyHostToDevice);
+
+    half* h_output, *d_output;
+    h_output = new half[1 * HIDDEN_DIM];
+    cudaMalloc(reinterpret_cast<void**>(&d_output), sizeof(half) * 1 * HIDDEN_DIM);
+    
+    half *global_reduce;
+    cudaMalloc(reinterpret_cast<void**>(&global_reduce), sizeof(half) * HIDDEN_DIM);
+
+    CUtensorMap tensor_map{};
+    // rank is the number of dimensions of the array.
+    constexpr uint32_t rank = 2;
+    uint64_t size[rank] = {HIDDEN_DIM, 4 * HIDDEN_DIM};
+    // The stride is the number of bytes to traverse from the first element of one row to the next.
+    // It must be a multiple of 16.
+    uint64_t stride[rank - 1] = {HIDDEN_DIM * sizeof(half)};
+    // The box_size is the size of the shared memory buffer that is used as the
+    // destination of a TMA transfer.
+    uint32_t box_size[rank] = {HEAD_DIM, TMA_LOAD_ONCE};
+    // The distance between elements in units of sizeof(element). A stride of 2
+    // can be used to load only the real component of a complex-valued tensor, for instance.
+    uint32_t elem_stride[rank] = {1, 1};
+
+    // Create the tensor descriptor.
+    CUresult res = cuTensorMapEncodeTiled(
+        &tensor_map,                // CUtensorMap *tensorMap,
+        CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_FLOAT16,
+        rank,                       // cuuint32_t tensorRank,
+        d_w_qkvo,                 // void *globalAddress,
+        size,                       // const cuuint64_t *globalDim,
+        stride,                     // const cuuint64_t *globalStrides,
+        box_size,                   // const cuuint32_t *boxDim,
+        elem_stride,                // const cuuint32_t *elementStrides,
+        // Interleave patterns can be used to accelerate loading of values that
+        // are less than 4 bytes long.
+        CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
+        // Swizzling can be used to avoid shared memory bank conflicts.
+        CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
+        // L2 Promotion can be used to widen the effect of a cache-policy to a wider
+        // set of L2 cache lines.
+        CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
+        // Any element that is outside of bounds will be set to zero by the TMA transfer.
+        CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+    );
+
+    dim3 grid(HEAD_NUM * CLUSTER_SIZE); 
+    dim3 block(BLOCK_SIZE);
+
+    int wmup = 1;
+    int test = 0;
+    for (int i = 0; i < wmup; i++) {
+        single_decode<<<grid, block, max_shmem_size>>>(
+            d_output,
+            d_input,
+            d_w_qkvo,
+            d_k_cache,
+            d_v_cache,
+            d_ffn_gate,
+            d_ffn_down,
+            d_ffn_up,
+            global_reduce,
+            d_rms_input,
+            d_rms_attn,
+            d_cos,
+            d_sin,
+            tensor_map
+        );
+    }
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA error: %s\n", cudaGetErrorString(err));
+    }
+    cudaDeviceSynchronize();
+
+    cudaEvent_t st, ed;
+    cudaEventCreate(&st);
+    cudaEventCreate(&ed);
+    cudaEventRecord(st);
+    for (int i = 0; i < test; i++) {
+        single_decode<<<grid, block, max_shmem_size>>>(
+            d_output,
+            d_input,
+            d_w_qkvo,
+            d_k_cache,
+            d_v_cache,
+            d_ffn_gate,
+            d_ffn_down,
+            d_ffn_up,
+            global_reduce,
+            d_rms_input,
+            d_rms_attn,
+            d_cos,
+            d_sin,
+            tensor_map
+        );
+    }
+    cudaEventRecord(ed);
+    cudaEventSynchronize(ed);
+    float ms;
+    cudaEventElapsedTime(&ms, st, ed);
+    std::cout << "Latency: " << ms / test * 1e3 << " us" << std::endl;
+    cudaMemcpy(h_output, reinterpret_cast<void*>(d_output), sizeof(half) * 1 * HIDDEN_DIM, cudaMemcpyDeviceToHost);
+    return 0;
+}

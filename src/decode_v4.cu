@@ -1,4 +1,4 @@
-#include "cuda_runtime.h"                                                                                                              
+#include "cuda_runtime.h"                                                                                        
 #include "cooperative_groups.h"
 #include "cuda_fp16.h"
 #include <iostream>
@@ -332,7 +332,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         }
     }
     block.sync();
-    
+
     // Softmax
     float local_scale = 0.0f;
     __shared__ float final_scale;
