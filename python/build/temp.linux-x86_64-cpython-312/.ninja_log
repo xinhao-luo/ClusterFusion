@@ -1,5 +1,0 @@
-# ninja log v5
-3	14775	1741076758835550604	/cephfs/xhluo/Fuse-all-Kernel/python/build/temp.linux-x86_64-cpython-312/pybind.o	14402668dcb1c9f2
-48	40007	1741077863887962638	/cephfs/xhluo/Fuse-all-Kernel/python/build/temp.linux-x86_64-cpython-312/kernel/single_decode_layer.o	f6291b047f76b241
-42	43927	1741078217021920586	/cephfs/xhluo/Fuse-all-Kernel/python/build/temp.linux-x86_64-cpython-312/kernel/single_decode_layer.o	f6291b047f76b241
-106	40421	1741152039068599824	/cephfs/xhluo/Fuse-all-Kernel/python/build/temp.linux-x86_64-cpython-312/kernel/single_decode_layer.o	f6291b047f76b241
