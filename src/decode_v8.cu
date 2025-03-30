@@ -16,12 +16,12 @@ namespace cde = cuda::device::experimental;
 #define HEAD_NUM 32     
 #define FFN_DIM 12288   
 #define HIDDEN_DIM 4096 
-#define SEQ_LEN 4096   
+#define SEQ_LEN 16384
 
 #define NUM_WARPS 4 // 4 8 16 32
 #define WARP_SIZE 32
 #define BLOCK_SIZE (NUM_WARPS * WARP_SIZE) 
-#define CLUSTER_SIZE 4 // 2 4 8 16
+#define CLUSTER_SIZE 4 // 2 4
 #define NUM_PER_THREAD 8
 #define NUM_ROW_PER_WARP (HEAD_DIM / NUM_WARPS) 
 #define NUM_THREAD_PER_ROW (WARP_SIZE / NUM_ROW_PER_WARP) 
@@ -42,9 +42,9 @@ namespace cde = cuda::device::experimental;
 #define TMA_LOAD_ONCE_NUM_FFN_TOTAL (TMA_LOAD_ONCE * FFN_DIM_PER_CLUSTER)
 #define TMA_LOAD_ONCE_SIZE_FFN (TMA_LOAD_ONCE_NUM_FFN_TOTAL * sizeof(half))
 
-#define NUM_THREAD_PER_ROW_2 (HEAD_DIM / NUM_PER_THREAD) 
-#define NUM_ROW_PER_WARP_2 (WARP_SIZE / NUM_THREAD_PER_ROW_2)
-#define NUM_PER_ROW_2 (NUM_WARPS * NUM_ROW_PER_WARP_2)
+#define NUM_THREAD_PER_ROW_2 (HEAD_DIM / NUM_PER_THREAD) // 16
+#define NUM_ROW_PER_WARP_2 (WARP_SIZE / NUM_THREAD_PER_ROW_2) // 2
+#define NUM_PER_ROW_2 (NUM_WARPS * NUM_ROW_PER_WARP_2) // 8
 #define DEC_TILE (TMA_LOAD_ONCE_ATTN / NUM_PER_ROW_2)
 #define NUM_ROW_PER_WARP_3 (TMA_LOAD_ONCE / NUM_WARPS) 
 #define NUM_THREAD_PER_ROW_3 (WARP_SIZE / NUM_ROW_PER_WARP_3) 
@@ -87,8 +87,10 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     const uint32_t head_id          = grid.cluster_rank() % HEAD_NUM;
     const uint32_t cluster_block_id = cluster.block_rank();
     const uint32_t tid              = block.thread_rank();
-    const uint32_t lane_id = tid % WARP_SIZE; // 32 per warp
+    const uint32_t lane_id = tid % WARP_SIZE; 
     const uint32_t warp_id = tid / WARP_SIZE;
+    const uint32_t tile_row = tid / NUM_THREAD_PER_ROW_2;
+    const uint32_t tile_col = tid % NUM_THREAD_PER_ROW_2;
 
     // Init shared memory
     __shared__ __align__(16) half input_shmem[DIM_PER_BLOCK];
@@ -96,7 +98,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     __shared__ float cluster_local_sum;
     __shared__ alignas(128) half weight[2 * TMA_LOAD_ONCE * MAX_SMEM_DIM];
     __shared__ __align__(16) half local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM + HEAD_DIM];
-    __shared__ __align__(16) half local_buffer[MAX_SMEM_DIM + MAX_SMEM_DIM + HEAD_DIM];
     __shared__ __align__(16) half local_output[HEAD_DIM];
 
     // Init register
@@ -105,13 +106,13 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     float tmp = 0.0;
     half __align__(16) reg_input[NUM_PER_THREAD];
     half __align__(16) reg_weight[NUM_PER_THREAD];
-    half __align__(16) reg_input_2[NUM_PER_THREAD];
-    float __align__(16) qk[DEC_TILE];
     half2 q_rope, q_rope_1;
     half2 k_rope, k_rope_1;
     float2 cos_reg, sin_reg;
     uint32_t size;
     half2 buffer;
+    half __align__(16) reg_reduce[NUM_PER_THREAD];
+    float __align__(16) qk[DEC_TILE];
     float tmp_ffn[FFN_DIM_PER_CLUSTER / HEAD_DIM];
     for (int j = 0; j < FFN_DIM_PER_CLUSTER / HEAD_DIM; j++){
       tmp_ffn[j] = 0.0;
@@ -337,7 +338,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         cluster.sync();
         if (tid == 0) {
             uint32_t src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_qkv));
-            uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_buffer));
+            uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(weight));
             uint32_t dst_cta = (cluster_block_id + i) % cluster.num_blocks();
             uint32_t neighbor_dst_addr;
             asm volatile (
@@ -374,7 +375,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         // Local reduce-add
         if (tid < HEAD_DIM / 2) {
             for (int j = 0; j < 3; j++) {
-                buffer = *(half2*)(&local_buffer[j * HEAD_DIM + tid * 2]);
+                buffer = *(half2*)(&weight[j * HEAD_DIM + tid * 2]);
                 *(half2*)(&local_qkv[j * HEAD_DIM + tid * 2]) = __hadd2(*(half2*)(&local_qkv[j * HEAD_DIM + tid * 2]), buffer);
             }
         }
@@ -409,6 +410,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     if (tid < HEAD_DIM) {
         local_output[tid] = __float2half(0.0f);
     }
+    for(int i = 0; i < NUM_PER_THREAD; i++)
+        reg_reduce[i] = __float2half(0.0f);
     *(uint4*)(&reg_input[0]) = *(uint4*)(&local_qkv[input_idx_2]);
     block.sync();
 
@@ -442,7 +445,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
             for (int mask = (NUM_THREAD_PER_ROW_2 >> 1); mask > 0; mask >>= 1) {
                 qk[j] += __shfl_down_sync(0xffffffff, qk[j], mask);
             }
-            // qk[j] = __expf(qk[j] * __frsqrt_rn(HEAD_DIM));
+            qk[j] = __expf(qk[j] * __frsqrt_rn(HEAD_DIM));
             local_sum += qk[j];
         }
 
@@ -457,7 +460,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
             *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight[((id - 1) % 2) * TMA_LOAD_ONCE_NUM + TMA_LOAD_ONCE_NUM_ATTN + (weight_idx_2 + j) * HEAD_DIM + input_idx_2]);
             #pragma unroll
             for (int d = 0; d < NUM_PER_THREAD; d++) {
-                local_output[input_idx_2 + d] += __float2half(qk[j] * __half2float(reg_weight[d]));
+                reg_reduce[d] += __float2half(qk[j] * __half2float(reg_weight[d]));
             }
         }
     }
@@ -476,7 +479,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         for (int mask = (NUM_THREAD_PER_ROW_2 >> 1); mask > 0; mask >>= 1) {
             qk[j] += __shfl_down_sync(0xffffffff, qk[j], mask);
         }
-        // qk[j] = __expf(qk[j] * __frsqrt_rn(HEAD_DIM));
+        qk[j] = __expf(qk[j] * __frsqrt_rn(HEAD_DIM));
         local_sum += qk[j];
     }
     bar[3].wait(std::move(token[3]));
@@ -487,12 +490,15 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
             *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight[TMA_LOAD_ONCE_NUM + TMA_LOAD_ONCE_NUM_ATTN + (weight_idx_2 + j) * HEAD_DIM + input_idx_2]);
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
-            local_output[input_idx_2 + d] += __float2half(qk[j] * __half2float(reg_weight[d]));
+            reg_reduce[d] += __float2half(qk[j] * __half2float(reg_weight[d]));
         }
     }
     if (lane_id % NUM_THREAD_PER_ROW_2 == 0) {
-        reduction[warp_id] += local_sum;
+        atomicAdd(&reduction[warp_id], local_sum);
     }
+    *(uint4*)(&weight[tile_row * HEAD_DIM + tile_col * NUM_PER_THREAD]) = *(uint4*)(&reg_reduce[0]);
+    for(int i = 0; i < NUM_PER_THREAD; i++)
+        reg_reduce[i] = __float2half(0.0f);
     block.sync();
     if (tid < NUM_WARPS) {
         local_sum = reduction[tid];
@@ -515,8 +521,18 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         }
         cluster.sync();
     }
-    if(tid < HEAD_DIM)
-        local_output[tid] = __float2half(__half2float(local_output[tid]) / cluster_local_sum);
+    for (int i = 0; i < NUM_PER_ROW_2; i++) {
+        *(uint4*)(&reg_input[0]) = *(uint4*)(&weight[i * HEAD_DIM + tile_col * NUM_PER_THREAD]);
+        #pragma unroll
+        for (int j = 0; j < NUM_PER_THREAD; j++)
+            reg_reduce[j] += reg_input[j];
+    }
+    if(tid < NUM_THREAD_PER_ROW_2) {
+        *(uint4*)(&local_output[tid * NUM_PER_THREAD]) = *(uint4*)(&reg_reduce[0]);
+        #pragma unroll
+        for (int j = 0; j < NUM_PER_THREAD; j++)
+            local_output[tid * NUM_PER_THREAD + j] = __float2half(__half2float(local_output[tid * NUM_PER_THREAD + j]) * __frcp_rn(cluster_local_sum));
+    }
     block.sync();
 
     // DSM Ring-All reduce
@@ -537,7 +553,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         cluster.sync();
         if (tid == 0) {
             uint32_t src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_output));
-            uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_buffer));
+            uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(weight));
             uint32_t dst_cta = (cluster_block_id + i) % cluster.num_blocks();
             uint32_t neighbor_dst_addr;
             asm volatile (
@@ -573,7 +589,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
 
         // Add
         if (tid < HEAD_DIM / 2) {
-            buffer = *(half2*)(&local_buffer[tid * 2]);
+            buffer = *(half2*)(&weight[tid * 2]);
             *(half2*)(&local_output[tid * 2]) = __hadd2(*(half2*)(&local_output[tid * 2]), buffer);
         }
         cluster.sync();
@@ -807,7 +823,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         cluster.sync();
         if (tid == 0) {
             uint32_t src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_qkv));
-            uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_buffer));
+            uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(weight));
             uint32_t dst_cta = (cluster_block_id + i) % cluster.num_blocks();
             uint32_t neighbor_dst_addr;
             asm volatile (
@@ -844,14 +860,14 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         // Add
         if (tid < HEAD_DIM / 2) {
             for (int j = 0; j < FFN_DIM_PER_CLUSTER / HEAD_DIM; j++) {
-              buffer = *(half2*)(&local_buffer[j * HEAD_DIM + tid * 2]);
+              buffer = *(half2*)(&weight[j * HEAD_DIM + tid * 2]);
               if (i == cluster.num_blocks() - 2) // ReLU
                   *(half2*)(&local_qkv[j * HEAD_DIM + tid * 2]) = __hmax2(__hadd2(*(half2*)(&local_qkv[j * HEAD_DIM + tid * 2]), buffer), __float22half2_rn({0.0f, 0.0f}));
               else
                   *(half2*)(&local_qkv[j * HEAD_DIM + tid * 2]) = __hadd2(*(half2*)(&local_qkv[j * HEAD_DIM + tid * 2]), buffer);
             }
             for (int j = 0; j < FFN_DIM_PER_CLUSTER / HEAD_DIM; j++) {
-                buffer = *(half2*)(&local_buffer[FFN_DIM_PER_CLUSTER + j * HEAD_DIM + tid * 2]);
+                buffer = *(half2*)(&weight[FFN_DIM_PER_CLUSTER + j * HEAD_DIM + tid * 2]);
                 *(half2*)(&local_qkv[FFN_DIM_PER_CLUSTER + j * HEAD_DIM + tid * 2]) = __hadd2(*(half2*)(&local_qkv[FFN_DIM_PER_CLUSTER + j * HEAD_DIM + tid * 2]), buffer);
             }
         }
@@ -879,18 +895,18 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         tmp = 0.0;
         for (int j = 0; j < TMA_LOAD_ONCE_MAX; j+=NUM_PER_ROW_3) {
             *(uint4*)(&reg_input[0]) = *(uint4*)(&local_qkv[input_idx_3 + j]);
-            *(uint4*)(&reg_input_2[0]) = *(uint4*)(&local_qkv[MAX_SMEM_DIM + input_idx_3 + j]);
+            *(uint4*)(&reg_reduce[0]) = *(uint4*)(&local_qkv[MAX_SMEM_DIM + input_idx_3 + j]);
             #pragma unroll
             for (int d = 0; d < NUM_PER_THREAD; d++) {
-                tmp += __half2float(reg_input[d] * reg_input_2[d] * weight[(id - 1) % 2 * TMA_LOAD_ONCE_NUM_FFN_TOTAL + (input_idx_3 + j + d) * TMA_LOAD_ONCE + weight_idx_3]);
+                tmp += __half2float(reg_input[d] * reg_reduce[d] * weight[(id - 1) % 2 * TMA_LOAD_ONCE_NUM_FFN_TOTAL + (input_idx_3 + j + d) * TMA_LOAD_ONCE + weight_idx_3]);
             }
         }
         for (int j = 0; j < FFN_DIM_PER_CLUSTER - TMA_LOAD_ONCE_MAX; j+=NUM_PER_ROW_3) {
             *(uint4*)(&reg_input[0]) = *(uint4*)(&local_qkv[input_idx_3 + TMA_LOAD_ONCE_MAX + j]);
-            *(uint4*)(&reg_input_2[0]) = *(uint4*)(&local_qkv[MAX_SMEM_DIM + input_idx_3 + TMA_LOAD_ONCE_MAX + j]);
+            *(uint4*)(&reg_reduce[0]) = *(uint4*)(&local_qkv[MAX_SMEM_DIM + input_idx_3 + TMA_LOAD_ONCE_MAX + j]);
             #pragma unroll
             for (int d = 0; d < NUM_PER_THREAD; d++) {
-                tmp += __half2float(reg_input[d] * reg_input_2[d] * weight[(id - 1) % 2 * TMA_LOAD_ONCE_NUM_FFN_TOTAL + TMA_LOAD_ONCE_NUM_FFN + (input_idx_3 + j + d) * TMA_LOAD_ONCE + weight_idx_3]);
+                tmp += __half2float(reg_input[d] * reg_reduce[d] * weight[(id - 1) % 2 * TMA_LOAD_ONCE_NUM_FFN_TOTAL + TMA_LOAD_ONCE_NUM_FFN + (input_idx_3 + j + d) * TMA_LOAD_ONCE + weight_idx_3]);
             }
         }
         #pragma unroll
@@ -905,18 +921,18 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     tmp = 0.0;
     for (int j = 0; j < TMA_LOAD_ONCE_MAX; j+=NUM_PER_ROW_3) {
         *(uint4*)(&reg_input[0]) = *(uint4*)(&local_qkv[input_idx_3 + j]);
-        *(uint4*)(&reg_input_2[0]) = *(uint4*)(&local_qkv[MAX_SMEM_DIM + input_idx_3 + j]);
+        *(uint4*)(&reg_reduce[0]) = *(uint4*)(&local_qkv[MAX_SMEM_DIM + input_idx_3 + j]);
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
-            tmp += __half2float(reg_input[d] * reg_input_2[d] * weight[TMA_LOAD_ONCE_NUM_FFN_TOTAL + (input_idx_3 + j + d) * TMA_LOAD_ONCE + weight_idx_3]);
+            tmp += __half2float(reg_input[d] * reg_reduce[d] * weight[TMA_LOAD_ONCE_NUM_FFN_TOTAL + (input_idx_3 + j + d) * TMA_LOAD_ONCE + weight_idx_3]);
         }
     }
     for (int j = 0; j < FFN_DIM_PER_CLUSTER - TMA_LOAD_ONCE_MAX; j+=NUM_PER_ROW_3) {
         *(uint4*)(&reg_input[0]) = *(uint4*)(&local_qkv[input_idx_3 + TMA_LOAD_ONCE_MAX + j]);
-        *(uint4*)(&reg_input_2[0]) = *(uint4*)(&local_qkv[MAX_SMEM_DIM + input_idx_3 + TMA_LOAD_ONCE_MAX + j]);
+        *(uint4*)(&reg_reduce[0]) = *(uint4*)(&local_qkv[MAX_SMEM_DIM + input_idx_3 + TMA_LOAD_ONCE_MAX + j]);
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
-            tmp += __half2float(reg_input[d] * reg_input_2[d] * weight[TMA_LOAD_ONCE_NUM_FFN_TOTAL + TMA_LOAD_ONCE_NUM_FFN + (input_idx_3 + j + d) * TMA_LOAD_ONCE + weight_idx_3]);
+            tmp += __half2float(reg_input[d] * reg_reduce[d] * weight[TMA_LOAD_ONCE_NUM_FFN_TOTAL + TMA_LOAD_ONCE_NUM_FFN + (input_idx_3 + j + d) * TMA_LOAD_ONCE + weight_idx_3]);
         }
     }
     #pragma unroll

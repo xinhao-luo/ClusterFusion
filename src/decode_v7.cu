@@ -1402,8 +1402,8 @@ int main(int argc, char** argv) {
     dim3 grid(HEAD_NUM * CLUSTER_SIZE); 
     dim3 block(BLOCK_SIZE);
 
-    int wmup = 100;
-    int test = 100;
+    int wmup = 1;
+    int test = 0;
     for (int i = 0; i < wmup; i++) {
         single_decode<<<grid, block, max_shmem_size>>>(
             d_output,
@@ -1456,7 +1456,7 @@ int main(int argc, char** argv) {
     cudaEventElapsedTime(&ms, st, ed);
     std::cout << "Latency: " << ms / test * 1e3 << " us" << std::endl;
     cudaMemcpy(h_output, reinterpret_cast<void*>(d_output), sizeof(half) * 1 * HIDDEN_DIM, cudaMemcpyDeviceToHost);
-    // for (int i = 0; i < HIDDEN_DIM; i++)
-    //     printf("%f, ", __half2float(h_output[i]));
+    for (int i = 0; i < HIDDEN_DIM; i++)
+        printf("%f, ", __half2float(h_output[i]));
     return 0;
 }
