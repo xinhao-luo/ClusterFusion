@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import time
 import math
 import flashinfer
-from fuse_all import single_decode_layer
+from FuseInfer import llama_decode_layer
 
 def initialize_rope_embeddings(HEAD_DIM):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -51,7 +51,7 @@ def sglang_single_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cach
     return o
 
 def generate_random_weights(shape):
-    return (torch.randn(shape) * 0.001 + 0.003).to(0).half()
+    return (torch.randn(shape) * 0.01).to(0).half()
 
 def test_sglang_single_decode_e2e(
     hidden_size,
@@ -85,17 +85,18 @@ def test_sglang_single_decode_e2e(
     rms_attn_weight = generate_random_weights((1, hidden_size)).to(0).half()
 
     # Generate full kv_cache with shape (2 * seq_len, num_heads * head_dim)
-    kv_cache_full = generate_random_weights((2 * seq_len, num_heads * head_dim)).to(0).half()
+    kv_cache_full = generate_random_weights((2, seq_len, num_heads * head_dim)).to(0).half()
 
     # RoPE with cos and sin
     cos, sin = initialize_rope_embeddings(head_dim)
     
     # Ours kernel
-    o = single_decode_layer(
+    o = llama_decode_layer(
         input_tensor,          
         weight_qkv,                          
         weight_o,              
-        kv_cache_full,                            
+        kv_cache_full[0],
+        kv_cache_full[1],           
         gate_up_proj_weight_fuse,      
         down_proj_weight_fuse,      
         rms_input_weight,      
@@ -105,7 +106,7 @@ def test_sglang_single_decode_e2e(
     )
     print(o.shape, o)
 
-    eps = 1e-5
+    eps = 1e-6
     rms_input_weight = rms_input_weight.reshape((hidden_size,))
     rms_attn_weight = rms_attn_weight.reshape((hidden_size,))
     
@@ -123,8 +124,8 @@ def test_sglang_single_decode_e2e(
     down_proj.weight.data = down_proj_weight_sglang.view(down_proj.weight.data.shape)
 
     # Split kv_cache_full into two parts for kv_cache_sgl initialization
-    kv_cache_k = kv_cache_full[:seq_len].view(seq_len, num_heads, head_dim)
-    kv_cache_v = kv_cache_full[seq_len:2*seq_len].view(seq_len, num_heads, head_dim)
+    kv_cache_k = kv_cache_full[0].view(seq_len, num_heads, head_dim)
+    kv_cache_v = kv_cache_full[1].view(seq_len, num_heads, head_dim)
     kv_cache_sgl = torch.cat([kv_cache_k[:seq_len-1], kv_cache_v[:seq_len-1]], dim=0).view(2, seq_len-1, num_heads, head_dim)
     
     o_sgl = sglang_single_decode(input_tensor, rms_input_weight, rms_attn_weight, eps, kv_cache_sgl, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, kv_layout, pos_encoding_mode, cos, sin)
@@ -135,4 +136,4 @@ def test_sglang_single_decode_e2e(
     assert max_diff < 9 * 1e-4, "The maximum difference is too large!"
 
 if __name__ == "__main__":
-    test_sglang_single_decode_e2e(4096, 2048, 32, "NHD", "NONE")
+    test_sglang_single_decode_e2e(4096, 4096, 32, "NHD", "NONE")

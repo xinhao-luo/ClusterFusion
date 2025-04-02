@@ -2,7 +2,6 @@
 #include "cooperative_groups.h"
 #include "cuda_fp16.h"
 #include <cuda.h>    
-#include <iostream>
 
 namespace cg = cooperative_groups;
 

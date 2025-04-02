@@ -185,7 +185,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         }
         cluster.sync();
     }
-    float eps = 1e-5;
+    float eps = 1e-6;
     half rms_rcp = __float2half(1.f / (std::sqrt(cluster_local_sum / float(HIDDEN_DIM)) + eps));
     for (int d = tid * 2; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 2) { 
         *(half2*)(&reg_input_norm[0]) = *(half2*)(&input_shmem[d]);
@@ -407,9 +407,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     local_sum = 0.0f;
     if(lane_id == 0)
         reduction[warp_id] = 0.0f;
-    if (tid < HEAD_DIM) {
-        local_output[tid] = __float2half(0.0f);
-    }
     for(int i = 0; i < NUM_PER_THREAD; i++)
         reg_reduce[i] = __float2half(0.0f);
     *(uint4*)(&reg_input[0]) = *(uint4*)(&local_qkv[input_idx_2]);
@@ -594,7 +591,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         }
         cluster.sync();
     }
-
+    // if(head_id == 0 && cluster_block_id == 1 && tid == 0)
+    //     printf("%f, %f \n", __half2float(local_output[0]), __half2float(local_output[127]));
     // Compute output @ w_o
     // Preload w_o
     if (tid == 0) {
@@ -649,6 +647,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     // Fused residual and RMSNorm
     local_sum = 0.0;
     for (int d = tid * 2; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 2) { 
+        // printf("%f, %f \n", __half2float(input_shmem[d]), __half2float(global_reduce[cluster_block_st_id + d]));
         *(half2*)(&reg_input_norm[0]) = __hadd2(*(half2*)(&input_shmem[d]), *(half2*)(&global_reduce[cluster_block_st_id + d]));
         *(half2*)(&input_shmem[d]) = *(half2*)(&reg_input_norm[0]);
         for (int di = 0; di < 2; di++)
@@ -1257,8 +1256,8 @@ int main(int argc, char** argv) {
     dim3 grid(HEAD_NUM * CLUSTER_SIZE); 
     dim3 block(BLOCK_SIZE);
 
-    int wmup = 100;
-    int test = 100;
+    int wmup = 1;
+    int test = 0;
     for (int i = 0; i < wmup; i++) {
         single_decode<<<grid, block, max_shmem_size>>>(
             d_output,

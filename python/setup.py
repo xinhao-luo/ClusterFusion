@@ -12,14 +12,14 @@ extra_compile_args = {
 }
 
 setup(
-    name="fuse_all",
+    name="FuseInfer",
     packages=find_packages(),
     ext_modules=[
         CUDAExtension(
-            name="fuse_all",
+            name="FuseInfer",
             sources=[
                 "pybind.cpp",
-                "kernel/single_decode_layer.cu",
+                "kernel/llama_decode_layer.cu",
             ],
             extra_compile_args=extra_compile_args,
             libraries=["cuda", "cudart"],

@@ -1,0 +1,4 @@
+# ninja log v5
+2	15551	1743571379895835832	/cephfs/xhluo/Fuse-all-Kernel/python/build/temp.linux-x86_64-cpython-312/pybind.o	b32edb72ebb1fd28
+40	14086	1743572524973745998	/cephfs/xhluo/Fuse-all-Kernel/python/build/temp.linux-x86_64-cpython-312/pybind.o	b32edb72ebb1fd28
+39	39374	1743572550232843713	/cephfs/xhluo/Fuse-all-Kernel/python/build/temp.linux-x86_64-cpython-312/kernel/llama_decode_layer.o	6bd5a74ff9252eb4
