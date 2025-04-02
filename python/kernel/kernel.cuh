@@ -169,6 +169,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     if (lane_id % NUM_THREAD_PER_ROW == 0) {
         local_qkv[warp_id * NUM_ROW_PER_WARP + lane_id / NUM_THREAD_PER_ROW] = __float2half(tmp);
     }
+    block.sync();
 
     // Compute input @ w_k
     // Preload weight_k
@@ -211,7 +212,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     if (lane_id % NUM_THREAD_PER_ROW == 0) {
         local_qkv[HEAD_DIM + warp_id * NUM_ROW_PER_WARP + lane_id / NUM_THREAD_PER_ROW] = __float2half(tmp);
     }
-    
+    block.sync();
+
     // Compute input @ w_v
     // Preload weight_v
     tmp = 0.0;
@@ -253,6 +255,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     if (lane_id % NUM_THREAD_PER_ROW == 0) {
         local_qkv[HEAD_DIM * 2 + warp_id * NUM_ROW_PER_WARP + lane_id / NUM_THREAD_PER_ROW] = __float2half(tmp);
     }
+    block.sync();
 
     // DSM Ring All-reduce
     size = (HEAD_DIM * 3) * sizeof(half);
@@ -281,7 +284,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         *(half2*)(&local_qkv[tid * 2]) = __hadd2(__hmul2(q_rope, __float22half2_rn(cos_reg)), __hmul2(q_rope_1, __float22half2_rn(sin_reg)));
         *(half2*)(&local_qkv[HEAD_DIM + tid * 2]) = __hadd2(__hmul2(k_rope, __float22half2_rn(cos_reg)), __hmul2(k_rope_1, __float22half2_rn(sin_reg)));
     }
-    
+
     // Compute flash-decoding
     local_sum = 0.0f;
     for(int i = 0; i < NUM_PER_THREAD; i++)

@@ -566,7 +566,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         *(uint4*)(&input_shmem[d]) = *(uint4*)(&reg_input[0]);
     }
     block.sync();
-
+    // for(int i = 0; i < DIM_PER_BLOCK; i++)
+    //     printf("%f \n", __half2float(input_shmem[i]));
     // Compute input @ ffn_gate
     for (int j = 0; j < FFN_DIM_PER_CLUSTER / HEAD_DIM; j++){
         tmp_ffn[j] = 0.0;
@@ -692,7 +693,9 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         size, tid, HEAD_DIM, cluster_block_id,  
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, local_qkv, weight);
-    
+    // if(head_id == 0 && cluster_block_id == 0 && tid == 0)
+    //     printf("%f, %f, %f, %f \n", __half2float(local_qkv[0]), __half2float(local_qkv[383]), __half2float(local_qkv[384 + 0]), __half2float(local_qkv[384 + 383]));
+
     // Compute up_gate mul and down_proj
     if (tid == 0) {
         cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map_weight_down, cluster_block_st_id, head_id * FFN_DIM_PER_CLUSTER, bar[0]);
@@ -725,6 +728,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
             *(uint4*)(&reg_reduce[0]) = *(uint4*)(&local_qkv[MAX_SMEM_DIM + input_idx_3 + TMA_LOAD_ONCE_MAX + j]);
             #pragma unroll
             for (int d = 0; d < NUM_PER_THREAD; d++) {
+                // printf("%f \n", __half2float(__hmul(reg_input[d], reg_reduce[d])));
                 tmp += __half2float(__hmul(__hmul(reg_input[d], reg_reduce[d]), weight[(id - 1) % 2 * TMA_LOAD_ONCE_NUM_FFN_TOTAL + TMA_LOAD_ONCE_NUM_FFN + (input_idx_3 + j + d) * TMA_LOAD_ONCE + weight_idx_3]));
             }
         }
