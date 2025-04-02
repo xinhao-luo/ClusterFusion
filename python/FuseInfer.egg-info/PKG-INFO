@@ -1,4 +1,0 @@
-Metadata-Version: 2.1
-Name: FuseInfer
-Version: 0.0.0
-Requires-Dist: torch
