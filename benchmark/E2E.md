@@ -20,5 +20,5 @@ nsys profile --trace-fork-before-exec=true --cuda-graph-trace=node python tests/
 
 #### vLLM
 ```
-
+nsys profile --trace-fork-before-exec=true --cuda-graph-trace=node python benchmark_latency.py --model /cephfs/shared/model/llama-7b-hf-transformers-4.29 --batch-size 1 --input-len 1024 --output-len 8
 ```
