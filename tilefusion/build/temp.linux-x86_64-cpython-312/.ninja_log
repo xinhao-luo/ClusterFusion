@@ -1,0 +1,5 @@
+# ninja log v5
+2	14070	1744194314417960690	/cephfs/xhluo/Fuse-all-Kernel/tilefusion/build/temp.linux-x86_64-cpython-312/pybind.o	e883f37cceaec358
+30	41051	1744194420867511397	/cephfs/xhluo/Fuse-all-Kernel/tilefusion/build/temp.linux-x86_64-cpython-312/kernel/llm_decoder_layer.o	dde31dee18a8748b
+60	43556	1744196916228540088	/cephfs/xhluo/Fuse-all-Kernel/tilefusion/build/temp.linux-x86_64-cpython-312/kernel/llm_decoder_layer.o	dde31dee18a8748b
+31	38258	1744197585296845330	/cephfs/xhluo/Fuse-all-Kernel/tilefusion/build/temp.linux-x86_64-cpython-312/kernel/llm_decoder_layer.o	dde31dee18a8748b

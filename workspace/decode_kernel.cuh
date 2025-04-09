@@ -40,7 +40,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     __shared__ float cluster_local_sum, cluster_local_max;
     __shared__ alignas(128) half weight[2 * TMA_LOAD_ONCE * MAX_SMEM_DIM];
     __shared__ __align__(16) half local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM + HEAD_DIM];
-    __shared__ __align__(16) half local_output[HEAD_DIM];
 
     // Init register
     float local_sum = 0.0, eps = 1e-6, rms_rcp = 0.0, tmp = 0.0, local_max = 0.0, pre_max = 0.0, scale = 0.0, softmax_scale = __frsqrt_rn(HEAD_DIM);
@@ -78,6 +77,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     uint weight_idx_2 = warp_id * NUM_PER_ROW_2 + (lane_id / NUM_THREAD_PER_ROW_2) * DEC_TILE;
     uint input_idx_3 = (lane_id % NUM_THREAD_PER_ROW_3) * NUM_PER_THREAD;
     uint weight_idx_3 = warp_id * NUM_ROW_PER_WARP_3 + lane_id / NUM_THREAD_PER_ROW_3;
+    uint cluster_head_idx = head_id * HEAD_DIM;
+    uint cluster_head_ffn_idx = head_id * FFN_DIM_PER_CLUSTER;
 
     // Load input to shared memory
     #pragma unroll
@@ -132,7 +133,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     // Compute input @ w_q
     // Preload weight_q
     if (tid == 0) {
-        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map, head_id * HEAD_DIM, cluster_block_st_id, bar[0]);
+        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map, cluster_head_idx, cluster_block_st_id, bar[0]);
         token[0] = cuda::device::barrier_arrive_tx(bar[0], 1, TMA_LOAD_ONCE_SIZE);
     } else {
         token[0] = bar[0].arrive();
@@ -140,7 +141,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 
     for (int id = 1; id < DIM_PER_BLOCK / TMA_LOAD_ONCE; id++) {
         if (tid == 0) {
-            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM], &tensor_map, head_id * HEAD_DIM, cluster_block_st_id + id * TMA_LOAD_ONCE, bar[id % 2]);
+            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM], &tensor_map, cluster_head_idx, cluster_block_st_id + id * TMA_LOAD_ONCE, bar[id % 2]);
             token[id % 2] = cuda::device::barrier_arrive_tx(bar[id % 2], 1, TMA_LOAD_ONCE_SIZE);
         } else {
             token[id % 2] = bar[id % 2].arrive();
@@ -174,7 +175,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     // Preload weight_k
     tmp = 0.0;
     if (tid == 0) {
-        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map, head_id * HEAD_DIM, HIDDEN_DIM + cluster_block_st_id, bar[0]);
+        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map, cluster_head_idx, HIDDEN_DIM + cluster_block_st_id, bar[0]);
         token[0] = cuda::device::barrier_arrive_tx(bar[0], 1, TMA_LOAD_ONCE_SIZE);
     } else {
         token[0] = bar[0].arrive();
@@ -182,7 +183,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 
     for (int id = 1; id < DIM_PER_BLOCK / TMA_LOAD_ONCE; id++) {
         if (tid == 0) {
-            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM], &tensor_map, head_id * HEAD_DIM, HIDDEN_DIM + cluster_block_st_id + id * TMA_LOAD_ONCE, bar[id % 2]);
+            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM], &tensor_map, cluster_head_idx, HIDDEN_DIM + cluster_block_st_id + id * TMA_LOAD_ONCE, bar[id % 2]);
             token[id % 2] = cuda::device::barrier_arrive_tx(bar[id % 2], 1, TMA_LOAD_ONCE_SIZE);
         } else {
             token[id % 2] = bar[id % 2].arrive();
@@ -216,7 +217,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     // Preload weight_v
     tmp = 0.0;
     if (tid == 0) {
-        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map, head_id * HEAD_DIM, HIDDEN_DIM * 2 + cluster_block_st_id, bar[0]);
+        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map, cluster_head_idx, HIDDEN_DIM * 2 + cluster_block_st_id, bar[0]);
         token[0] = cuda::device::barrier_arrive_tx(bar[0], 1, TMA_LOAD_ONCE_SIZE);
     } else {
         token[0] = bar[0].arrive();
@@ -224,7 +225,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 
     for (int id = 1; id < DIM_PER_BLOCK / TMA_LOAD_ONCE; id++) {
         if (tid == 0) {
-            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM], &tensor_map, head_id * HEAD_DIM, HIDDEN_DIM * 2 + cluster_block_st_id + id * TMA_LOAD_ONCE, bar[id % 2]);
+            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM], &tensor_map, cluster_head_idx, HIDDEN_DIM * 2 + cluster_block_st_id + id * TMA_LOAD_ONCE, bar[id % 2]);
             token[id % 2] = cuda::device::barrier_arrive_tx(bar[id % 2], 1, TMA_LOAD_ONCE_SIZE);
         } else {
             token[id % 2] = bar[id % 2].arrive();
@@ -291,9 +292,9 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 
     // Preload kv_cache
     if (tid == 0) {
-        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map_k_cache, head_id * HEAD_DIM, cluster_block_id * KV_DIM_PER_BLOCK, bar[0]);
+        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map_k_cache, cluster_head_idx, cluster_block_id * KV_DIM_PER_BLOCK, bar[0]);
         token[0] = cuda::device::barrier_arrive_tx(bar[0], 1, TMA_LOAD_ONCE_SIZE_ATTN);
-        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[TMA_LOAD_ONCE_NUM_ATTN], &tensor_map_v_cache, head_id * HEAD_DIM, cluster_block_id * KV_DIM_PER_BLOCK, bar[2]);
+        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[TMA_LOAD_ONCE_NUM_ATTN], &tensor_map_v_cache, cluster_head_idx, cluster_block_id * KV_DIM_PER_BLOCK, bar[2]);
         token[2] = cuda::device::barrier_arrive_tx(bar[2], 1, TMA_LOAD_ONCE_SIZE_ATTN);
     } else {
         token[0] = bar[0].arrive();
@@ -302,7 +303,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 
     for (int id = 1; id < KV_DIM_PER_BLOCK / TMA_LOAD_ONCE_ATTN; id++) {
         if (tid == 0) {
-            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM], &tensor_map_k_cache, head_id * HEAD_DIM, cluster_block_st_id + id * TMA_LOAD_ONCE_ATTN, bar[id % 2]);
+            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM], &tensor_map_k_cache, cluster_head_idx, cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE_ATTN, bar[id % 2]);
             token[id % 2] = cuda::device::barrier_arrive_tx(bar[id % 2], 1, TMA_LOAD_ONCE_SIZE_ATTN);
         } else {
             token[id % 2] = bar[id % 2].arrive();
@@ -336,7 +337,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
             reg_reduce[j] = __hmul(reg_reduce[j], __float2half(scale));
         }
         if (tid == 0) {
-            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM + TMA_LOAD_ONCE_NUM_ATTN], &tensor_map_v_cache, head_id * HEAD_DIM, cluster_block_st_id + id * TMA_LOAD_ONCE_ATTN, bar[2 + id % 2]);
+            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM + TMA_LOAD_ONCE_NUM_ATTN], &tensor_map_v_cache, cluster_head_idx, cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE_ATTN, bar[2 + id % 2]);
             token[2 + id % 2] = cuda::device::barrier_arrive_tx(bar[2 + id % 2], 1, TMA_LOAD_ONCE_SIZE_ATTN);
         } else {
             token[2 + id % 2] = bar[2 + id % 2].arrive();
@@ -455,23 +456,23 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         reg_reduce[j] = __hmul(reg_reduce[j], __float2half(scale * __frcp_rn(cluster_local_sum)));
     }
     if(tid < NUM_THREAD_PER_ROW_2) {
-        *(uint4*)(&local_output[tid * NUM_PER_THREAD]) = *(uint4*)(&reg_reduce[0]);
+        *(uint4*)(&local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM + tid * NUM_PER_THREAD]) = *(uint4*)(&reg_reduce[0]);
     }
     block.sync();
 
     // DSM Ring-All reduce
     size = HEAD_DIM * sizeof(half);
-    src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_output));
+    src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(&local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM]));
     dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(weight));
     dsm_ring_allreduce<CLUSTER_SIZE, Stage::ATTN>(
         size, tid, HEAD_DIM, cluster_block_id,  
         src_addr, dst_addr, bar_ptr, 
-        neighbor_dst_bar, local_output, weight);
+        neighbor_dst_bar, &local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM], weight);
 
     // Compute output @ w_o
     // Preload w_o
     if (tid == 0) {
-        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map_weight_o, cluster_block_st_id, head_id * HEAD_DIM, bar[0]);
+        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map_weight_o, cluster_block_st_id, cluster_head_idx, bar[0]);
         token[0] = cuda::device::barrier_arrive_tx(bar[0], 1, TMA_LOAD_ONCE_SIZE);
     } else {
         token[0] = bar[0].arrive();
@@ -479,7 +480,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 
     for (int id = 1; id < DIM_PER_BLOCK / TMA_LOAD_ONCE; id++) {
         if (tid == 0) {
-            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM], &tensor_map_weight_o, cluster_block_st_id + id * TMA_LOAD_ONCE, head_id * HEAD_DIM, bar[id % 2]);
+            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM], &tensor_map_weight_o, cluster_block_st_id + id * TMA_LOAD_ONCE, cluster_head_idx, bar[id % 2]);
             token[id % 2] = cuda::device::barrier_arrive_tx(bar[id % 2], 1, TMA_LOAD_ONCE_SIZE);
         } else {
             token[id % 2] = bar[id % 2].arrive();
@@ -487,7 +488,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         bar[(id - 1) % 2].wait(std::move(token[(id - 1) % 2]));
         tmp = 0.0;
         for (int j = 0; j < HEAD_DIM; j+=NUM_PER_ROW_3) {
-            *(uint4*)(&reg_input[0]) = *(uint4*)(&local_output[input_idx_3 + j]);
+            *(uint4*)(&reg_input[0]) = *(uint4*)(&local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM + input_idx_3 + j]);
             #pragma unroll
             for (int d = 0; d < NUM_PER_THREAD; d++) {
                 tmp += __half2float(__hmul(reg_input[d], weight[(id - 1) % 2 * TMA_LOAD_ONCE_NUM + (input_idx_3 + j + d) * TMA_LOAD_ONCE + weight_idx_3]));
@@ -504,7 +505,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     bar[1].wait(std::move(token[1]));
     tmp = 0.0;
     for (int j = 0; j < HEAD_DIM; j+=NUM_PER_ROW_3) {
-        *(uint4*)(&reg_input[0]) = *(uint4*)(&local_output[input_idx_3 + j]);
+        *(uint4*)(&reg_input[0]) = *(uint4*)(&local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM + input_idx_3 + j]);
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
             tmp += __half2float(__hmul(reg_input[d], weight[TMA_LOAD_ONCE_NUM + (input_idx_3 + j + d) * TMA_LOAD_ONCE + weight_idx_3]));
@@ -574,8 +575,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     }
     // Preload weight_gate
     if (tid == 0) {
-        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map_weight_gate_up, head_id * FFN_DIM_PER_CLUSTER, cluster_block_st_id, bar[0]);
-        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[TMA_LOAD_ONCE_NUM_FFN], &tensor_map_weight_gate_up_, head_id * FFN_DIM_PER_CLUSTER + TMA_LOAD_ONCE_MAX, cluster_block_st_id, bar[0]);
+        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map_weight_gate_up, cluster_head_ffn_idx, cluster_block_st_id, bar[0]);
+        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[TMA_LOAD_ONCE_NUM_FFN], &tensor_map_weight_gate_up_, cluster_head_ffn_idx + TMA_LOAD_ONCE_MAX, cluster_block_st_id, bar[0]);
         token[0] = cuda::device::barrier_arrive_tx(bar[0], 1, TMA_LOAD_ONCE_SIZE_FFN);
     } else {
         token[0] = bar[0].arrive();
@@ -583,8 +584,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 
     for (int id = 1; id < DIM_PER_BLOCK / TMA_LOAD_ONCE; id++) {
         if (tid == 0) {
-            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM_FFN_TOTAL], &tensor_map_weight_gate_up, head_id * FFN_DIM_PER_CLUSTER, cluster_block_st_id + id * TMA_LOAD_ONCE, bar[id % 2]);
-            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM_FFN_TOTAL + TMA_LOAD_ONCE_NUM_FFN], &tensor_map_weight_gate_up_, head_id * FFN_DIM_PER_CLUSTER + TMA_LOAD_ONCE_MAX, cluster_block_st_id + id * TMA_LOAD_ONCE, bar[id % 2]);
+            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM_FFN_TOTAL], &tensor_map_weight_gate_up, cluster_head_ffn_idx, cluster_block_st_id + id * TMA_LOAD_ONCE, bar[id % 2]);
+            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM_FFN_TOTAL + TMA_LOAD_ONCE_NUM_FFN], &tensor_map_weight_gate_up_, cluster_head_ffn_idx + TMA_LOAD_ONCE_MAX, cluster_block_st_id + id * TMA_LOAD_ONCE, bar[id % 2]);
             token[id % 2] = cuda::device::barrier_arrive_tx(bar[id % 2], 1, TMA_LOAD_ONCE_SIZE_FFN);
         } else {
             token[id % 2] = bar[id % 2].arrive();
@@ -632,8 +633,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     }
     // Preload weight_up
     if (tid == 0) {
-        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map_weight_gate_up, head_id * FFN_DIM_PER_CLUSTER, HIDDEN_DIM + cluster_block_st_id, bar[0]);
-        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[TMA_LOAD_ONCE_NUM_FFN], &tensor_map_weight_gate_up_, head_id * FFN_DIM_PER_CLUSTER + TMA_LOAD_ONCE_MAX, HIDDEN_DIM + cluster_block_st_id, bar[0]);
+        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map_weight_gate_up, cluster_head_ffn_idx, HIDDEN_DIM + cluster_block_st_id, bar[0]);
+        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[TMA_LOAD_ONCE_NUM_FFN], &tensor_map_weight_gate_up_, cluster_head_ffn_idx + TMA_LOAD_ONCE_MAX, HIDDEN_DIM + cluster_block_st_id, bar[0]);
         token[0] = cuda::device::barrier_arrive_tx(bar[0], 1, TMA_LOAD_ONCE_SIZE_FFN);
     } else {
         token[0] = bar[0].arrive();
@@ -641,8 +642,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 
     for (int id = 1; id < DIM_PER_BLOCK / TMA_LOAD_ONCE; id++) {
         if (tid == 0) {
-            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM_FFN_TOTAL], &tensor_map_weight_gate_up, head_id * FFN_DIM_PER_CLUSTER, HIDDEN_DIM + cluster_block_st_id + id * TMA_LOAD_ONCE, bar[id % 2]);
-            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM_FFN_TOTAL + TMA_LOAD_ONCE_NUM_FFN], &tensor_map_weight_gate_up_, head_id * FFN_DIM_PER_CLUSTER + TMA_LOAD_ONCE_MAX, HIDDEN_DIM + cluster_block_st_id + id * TMA_LOAD_ONCE, bar[id % 2]);
+            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM_FFN_TOTAL], &tensor_map_weight_gate_up, cluster_head_ffn_idx, HIDDEN_DIM + cluster_block_st_id + id * TMA_LOAD_ONCE, bar[id % 2]);
+            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM_FFN_TOTAL + TMA_LOAD_ONCE_NUM_FFN], &tensor_map_weight_gate_up_, cluster_head_ffn_idx + TMA_LOAD_ONCE_MAX, HIDDEN_DIM + cluster_block_st_id + id * TMA_LOAD_ONCE, bar[id % 2]);
             token[id % 2] = cuda::device::barrier_arrive_tx(bar[id % 2], 1, TMA_LOAD_ONCE_SIZE_FFN);
         } else {
             token[id % 2] = bar[id % 2].arrive();
@@ -698,8 +699,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 
     // Compute up_gate mul and down_proj
     if (tid == 0) {
-        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map_weight_down, cluster_block_st_id, head_id * FFN_DIM_PER_CLUSTER, bar[0]);
-        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[TMA_LOAD_ONCE_NUM_FFN], &tensor_map_weight_down_, cluster_block_st_id, head_id * FFN_DIM_PER_CLUSTER + TMA_LOAD_ONCE_MAX, bar[0]);
+        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map_weight_down, cluster_block_st_id, cluster_head_ffn_idx, bar[0]);
+        cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[TMA_LOAD_ONCE_NUM_FFN], &tensor_map_weight_down_, cluster_block_st_id, cluster_head_ffn_idx + TMA_LOAD_ONCE_MAX, bar[0]);
         token[0] = cuda::device::barrier_arrive_tx(bar[0], 1, TMA_LOAD_ONCE_SIZE_FFN);
     } else {
         token[0] = bar[0].arrive();
@@ -707,8 +708,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 
     for (int id = 1; id < DIM_PER_BLOCK / TMA_LOAD_ONCE; id++) {
         if (tid == 0) {
-            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM_FFN_TOTAL], &tensor_map_weight_down, cluster_block_st_id + id * TMA_LOAD_ONCE, head_id * FFN_DIM_PER_CLUSTER, bar[id % 2]);
-            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM_FFN_TOTAL + TMA_LOAD_ONCE_NUM_FFN], &tensor_map_weight_down_, cluster_block_st_id + id * TMA_LOAD_ONCE, head_id * FFN_DIM_PER_CLUSTER + TMA_LOAD_ONCE_MAX, bar[id % 2]);
+            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM_FFN_TOTAL], &tensor_map_weight_down, cluster_block_st_id + id * TMA_LOAD_ONCE, cluster_head_ffn_idx, bar[id % 2]);
+            cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[(id % 2) * TMA_LOAD_ONCE_NUM_FFN_TOTAL + TMA_LOAD_ONCE_NUM_FFN], &tensor_map_weight_down_, cluster_block_st_id + id * TMA_LOAD_ONCE, cluster_head_ffn_idx + TMA_LOAD_ONCE_MAX, bar[id % 2]);
             token[id % 2] = cuda::device::barrier_arrive_tx(bar[id % 2], 1, TMA_LOAD_ONCE_SIZE_FFN);
         } else {
             token[id % 2] = bar[id % 2].arrive();

@@ -130,5 +130,14 @@ def test_sglang_single_decode_e2e(
     o_sgl = sglang_single_decode(input_tensor, rms_input_weight, rms_attn_weight, eps, kv_cache_sgl, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, kv_layout, cos, sin)
     print(o_sgl.shape, o_sgl)
 
+    mae = (o - o_sgl).abs().mean()
+    print("Mean Absolute Error (MAE):", mae.item())
+
+    mse = ((o - o_sgl) ** 2).mean()
+    print("Mean Squared Error (MSE):", mse.item())
+
+    max_error = (o - o_sgl).abs().max()
+    print("Max Error:", max_error.item())
+
 if __name__ == "__main__":
     test_sglang_single_decode_e2e(4096, 4096, 32, "NHD")
