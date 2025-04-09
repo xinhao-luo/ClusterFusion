@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch import nn
 
 import flashinfer
+from tilefusion import deepseek_decoder_layer
 
 def apply_rotary_pos_emb(q, k, cos, sin):
     cos = cos.unsqueeze(1)
@@ -22,9 +23,6 @@ def rotate_half(x):
 
 class DeepseekV2RMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
-        """
-        DeepseekV2RMSNorm is equivalent to T5LayerNorm
-        """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
