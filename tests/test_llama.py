@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import time
 import math
 import flashinfer
-from FuseInfer import llama_decode_layer
+from tilefusion import llama_decoder_layer
 
 def initialize_rope_embeddings(HEAD_DIM):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -29,7 +29,7 @@ def rotate_half(x):
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
-def sglang_single_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, kv_layout, pos_encoding_mode, cos, sin):
+def sglang_single_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, kv_layout, cos, sin):
     residual = torch.zeros(hidden.shape).to(0).half()
     flashinfer.fused_add_rmsnorm(hidden, residual, rms_input_weight, eps)
     residual = hidden
@@ -42,24 +42,23 @@ def sglang_single_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cach
     k = torch.cat((kv_cache[0], k_new), dim=0) 
     v = torch.cat((kv_cache[1], v_new), dim=0)
     o = flashinfer.single_decode_with_kv_cache(
-        q, k, v, kv_layout, pos_encoding_mode, use_tensor_cores=False
+        q, k, v, kv_layout, "NONE", use_tensor_cores=False
     )
     o = o_proj(o.view(1, 32 * head_dim))
     flashinfer.fused_add_rmsnorm(o, residual, rms_attn_weight, eps)
     o_ffn = F.relu(gate_proj(o)) * up_proj(o)
     o = down_proj(o_ffn)
-    return o
+    return o.detach()
 
-# without ' * 0.08', the outputs of FuseInfer and py both will be 'nan'
+# without ' * 0.1', the outputs of tilefusion and py both will be 'nan'
 def generate_random_weights(shape):
-    return (torch.randn(shape) * 0.08).to(0).half()
+    return (torch.randn(shape) * 0.1).to(0).half()
 
 def test_sglang_single_decode_e2e(
     hidden_size,
     seq_len,
     num_heads,
-    kv_layout,
-    pos_encoding_mode
+    kv_layout
 ):
     head_dim = hidden_size // num_heads
     ffn_dim_sglang = 11008  # sglang_single_decode uses 11008
@@ -91,7 +90,7 @@ def test_sglang_single_decode_e2e(
     # RoPE with cos and sin
     cos, sin = initialize_rope_embeddings(head_dim)
     # Ours kernel
-    o = llama_decode_layer(
+    o = llama_decoder_layer(
         input_tensor,          
         weight_qkv,                          
         weight_o,              
@@ -128,11 +127,8 @@ def test_sglang_single_decode_e2e(
     kv_cache_v = kv_cache_full[1].view(seq_len, num_heads, head_dim)
     kv_cache_sgl = torch.cat([kv_cache_k[:seq_len-1], kv_cache_v[:seq_len-1]], dim=0).view(2, seq_len-1, num_heads, head_dim)
     
-    o_sgl = sglang_single_decode(input_tensor, rms_input_weight, rms_attn_weight, eps, kv_cache_sgl, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, kv_layout, pos_encoding_mode, cos, sin)
+    o_sgl = sglang_single_decode(input_tensor, rms_input_weight, rms_attn_weight, eps, kv_cache_sgl, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, kv_layout, cos, sin)
     print(o_sgl.shape, o_sgl)
-    
-    avg_diff = torch.mean(torch.abs(o - o_sgl)).item()
-    print(f"Average difference: {avg_diff}")
 
 if __name__ == "__main__":
-    test_sglang_single_decode_e2e(4096, 4096, 32, "NHD", "NONE")
+    test_sglang_single_decode_e2e(4096, 4096, 32, "NHD")

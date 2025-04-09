@@ -1,3 +1,6 @@
+#ifndef DSM_CUH
+#define DSM_CUH
+
 #include "cuda_runtime.h"                
 #include "cooperative_groups.h"
 #include "cuda_fp16.h"
@@ -98,3 +101,4 @@ __device__ __forceinline__ void __cluster_dims__(cluster_size, 1, 1) dsm_ring_al
     }
 }
 
+#endif // DSM_CUH

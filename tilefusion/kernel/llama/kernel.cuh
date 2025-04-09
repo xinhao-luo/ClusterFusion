@@ -1,6 +1,6 @@
 #include <cuda/barrier>
 #include <cudaTypedefs.h>
-#include "dsm.cuh"
+#include "../dsm.cuh"
 #include "config.h"
 using barrier = cuda::barrier<cuda::thread_scope_block>;
 namespace cde = cuda::device::experimental;
@@ -765,9 +765,3 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         atomicAdd(&output[cluster_block_st_id + weight_idx_3 + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE], __float2half(tmp));
     }
 }
-
-// void SingleDecoderLayerDispatched(
-
-// ) {
-
-// }
