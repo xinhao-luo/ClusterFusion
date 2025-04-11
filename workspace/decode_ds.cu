@@ -19,7 +19,7 @@ namespace cde = cuda::device::experimental;
 #define KV_LORA_RANK 512    
 #define HEAD_NUM 16     
 #define HIDDEN_DIM 2048 
-#define SEQ_LEN 4096   
+#define SEQ_LEN 2048   
 
 #define NUM_WARPS 4 // 4 8 16 32
 #define WARP_SIZE 32

@@ -44,6 +44,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     // Init registers
     float local_sum = 0.0, eps = 1e-6, rms_rcp = 0.0, tmp = 0.0, local_max = 0.0, pre_max = 0.0, scale = 0.0, softmax_scale = __frsqrt_rn(HEAD_DIM);
     half __align__(16) reg_input[NUM_PER_THREAD], reg_weight[NUM_PER_THREAD], reg_reduce[NUM_PER_THREAD];
+    float* dst_shmem;
     half2 q_rope, q_rope_1, k_rope, k_rope_1;
     float2 cos_reg, sin_reg;
     uint32_t size;
@@ -115,7 +116,10 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         if (tid == 0) {
             local_sum = cluster_local_sum;
             int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
-            float* dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);
+            dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);  
+        }
+        cluster.sync();
+        if (tid == 0) {
             atomicAdd(dst_shmem, local_sum);
         }
         cluster.sync();
@@ -323,7 +327,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
             }
             #pragma unroll
             for (int mask = (NUM_THREAD_PER_ROW_2 >> 1); mask > 0; mask >>= 1) {
-                qk[j] += __shfl_down_sync(0xffffffff, qk[j], mask);
+                qk[j] += __shfl_xor_sync(0xffffffff, qk[j], mask);
             }
             qk[j] = qk[j] * softmax_scale;
             local_max = max(local_max, qk[j]);
@@ -369,7 +373,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         }
         #pragma unroll
         for (int mask = (NUM_THREAD_PER_ROW_2 >> 1); mask > 0; mask >>= 1) {
-            qk[j] += __shfl_down_sync(0xffffffff, qk[j], mask);
+            qk[j] += __shfl_xor_sync(0xffffffff, qk[j], mask);
         }
         qk[j] = qk[j] * softmax_scale;
         local_max = max(local_max, qk[j]);
@@ -417,8 +421,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         s *= scale;
         local_sum = local_sum * __expf(pre_max - local_max) + s;
         #pragma unroll
-        for (int j = 0; j < NUM_PER_THREAD; j++) {
-            reg_reduce[j] = __hadd(__hmul(reg_reduce[j], __float2half(__expf(pre_max - local_max))), __hmul(reg_input[j], __float2half(scale)));
+        for (int d = 0; d < NUM_PER_THREAD; d++) {
+            reg_reduce[d] = __hadd(__hmul(reg_reduce[d], __float2half(__expf(pre_max - local_max))), __hmul(reg_input[d], __float2half(scale)));
         }
     }
     block.sync();
@@ -449,8 +453,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         if (tid == 0) {
             local_sum = cluster_local_sum;
             int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
-            float* dst_shmem_sum = cluster.map_shared_rank(&cluster_local_sum, dst_cta);
-            atomicAdd(dst_shmem_sum, local_sum);
+            dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);  
+        }
+        cluster.sync();
+        if (tid == 0) {
+            atomicAdd(dst_shmem, local_sum);
         }
         cluster.sync();
     }
@@ -556,7 +563,10 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         if (tid == 0) {
             local_sum = cluster_local_sum;
             int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
-            float* dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);
+            dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);  
+        }
+        cluster.sync();
+        if (tid == 0) {
             atomicAdd(dst_shmem, local_sum);
         }
         cluster.sync();

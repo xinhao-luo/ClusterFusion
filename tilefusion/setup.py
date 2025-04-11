@@ -19,7 +19,8 @@ setup(
             name="tilefusion",
             sources=[
                 "pybind.cpp",
-                "kernel/llm_decoder_layer.cu",
+                "kernel/llama/llama_kernel_dispatch.cu",
+                "kernel/deepseek/deepseek_kernel_dispatch.cu",
             ],
             extra_compile_args=extra_compile_args,
             libraries=["cuda", "cudart"],

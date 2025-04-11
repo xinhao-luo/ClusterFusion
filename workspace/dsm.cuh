@@ -166,4 +166,3 @@ __device__ __forceinline__ void __cluster_dims__(cluster_size, 1, 1) dsm_ring_al
         }
     }
 }
-
