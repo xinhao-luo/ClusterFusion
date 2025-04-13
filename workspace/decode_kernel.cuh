@@ -26,7 +26,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     cg::grid_group grid             = cg::this_grid();
     cg::cluster_group cluster       = cg::this_cluster();
     cg::thread_block block          = cg::this_thread_block();
-    const uint32_t head_id          = grid.cluster_rank() % HEAD_NUM;
+    const uint32_t head_id          = grid.cluster_rank();
     const uint32_t cluster_block_id = cluster.block_rank();
     const uint32_t tid              = block.thread_rank();
     const uint32_t lane_id = tid % WARP_SIZE; 
@@ -41,9 +41,10 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     __shared__ alignas(128) half weight[2 * TMA_LOAD_ONCE * MAX_SMEM_DIM];
     __shared__ __align__(16) half local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM + HEAD_DIM];
 
-    // Init register
+    // Init registers
     float local_sum = 0.0, eps = 1e-6, rms_rcp = 0.0, tmp = 0.0, local_max = 0.0, pre_max = 0.0, scale = 0.0, softmax_scale = __frsqrt_rn(HEAD_DIM);
     half __align__(16) reg_input[NUM_PER_THREAD], reg_weight[NUM_PER_THREAD], reg_reduce[NUM_PER_THREAD];
+    float* dst_shmem;
     half2 q_rope, q_rope_1, k_rope, k_rope_1;
     float2 cos_reg, sin_reg;
     uint32_t size;
@@ -70,13 +71,13 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     block.sync();
 
     // Precompute some indices
-    uint cluster_block_st_id = cluster_block_id * DIM_PER_BLOCK;
     uint input_idx = (lane_id % NUM_THREAD_PER_ROW) * NUM_PER_THREAD;
     uint weight_idx = warp_id * NUM_ROW_PER_WARP + lane_id / NUM_THREAD_PER_ROW;
     uint input_idx_2 = (lane_id % NUM_THREAD_PER_ROW_2) * NUM_PER_THREAD;
     uint weight_idx_2 = warp_id * NUM_PER_ROW_2 + (lane_id / NUM_THREAD_PER_ROW_2) * DEC_TILE;
     uint input_idx_3 = (lane_id % NUM_THREAD_PER_ROW_3) * NUM_PER_THREAD;
     uint weight_idx_3 = warp_id * NUM_ROW_PER_WARP_3 + lane_id / NUM_THREAD_PER_ROW_3;
+    uint cluster_block_st_id = cluster_block_id * DIM_PER_BLOCK;
     uint cluster_head_idx = head_id * HEAD_DIM;
     uint cluster_head_ffn_idx = head_id * FFN_DIM_PER_CLUSTER;
 
@@ -115,7 +116,10 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         if (tid == 0) {
             local_sum = cluster_local_sum;
             int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
-            float* dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);
+            dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);  
+        }
+        cluster.sync();
+        if (tid == 0) {
             atomicAdd(dst_shmem, local_sum);
         }
         cluster.sync();
@@ -170,6 +174,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     if (lane_id % NUM_THREAD_PER_ROW == 0) {
         local_qkv[warp_id * NUM_ROW_PER_WARP + lane_id / NUM_THREAD_PER_ROW] = __float2half(tmp);
     }
+    block.sync();
 
     // Compute input @ w_k
     // Preload weight_k
@@ -212,7 +217,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     if (lane_id % NUM_THREAD_PER_ROW == 0) {
         local_qkv[HEAD_DIM + warp_id * NUM_ROW_PER_WARP + lane_id / NUM_THREAD_PER_ROW] = __float2half(tmp);
     }
-    
+    block.sync();
+
     // Compute input @ w_v
     // Preload weight_v
     tmp = 0.0;
@@ -254,6 +260,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     if (lane_id % NUM_THREAD_PER_ROW == 0) {
         local_qkv[HEAD_DIM * 2 + warp_id * NUM_ROW_PER_WARP + lane_id / NUM_THREAD_PER_ROW] = __float2half(tmp);
     }
+    block.sync();
 
     // DSM Ring All-reduce
     size = (HEAD_DIM * 3) * sizeof(half);
@@ -282,7 +289,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         *(half2*)(&local_qkv[tid * 2]) = __hadd2(__hmul2(q_rope, __float22half2_rn(cos_reg)), __hmul2(q_rope_1, __float22half2_rn(sin_reg)));
         *(half2*)(&local_qkv[HEAD_DIM + tid * 2]) = __hadd2(__hmul2(k_rope, __float22half2_rn(cos_reg)), __hmul2(k_rope_1, __float22half2_rn(sin_reg)));
     }
-    
+
     // Compute flash-decoding
     local_sum = 0.0f;
     for(int i = 0; i < NUM_PER_THREAD; i++)
@@ -320,7 +327,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
             }
             #pragma unroll
             for (int mask = (NUM_THREAD_PER_ROW_2 >> 1); mask > 0; mask >>= 1) {
-                qk[j] += __shfl_down_sync(0xffffffff, qk[j], mask);
+                qk[j] += __shfl_xor_sync(0xffffffff, qk[j], mask);
             }
             qk[j] = qk[j] * softmax_scale;
             local_max = max(local_max, qk[j]);
@@ -366,7 +373,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         }
         #pragma unroll
         for (int mask = (NUM_THREAD_PER_ROW_2 >> 1); mask > 0; mask >>= 1) {
-            qk[j] += __shfl_down_sync(0xffffffff, qk[j], mask);
+            qk[j] += __shfl_xor_sync(0xffffffff, qk[j], mask);
         }
         qk[j] = qk[j] * softmax_scale;
         local_max = max(local_max, qk[j]);
@@ -414,8 +421,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         s *= scale;
         local_sum = local_sum * __expf(pre_max - local_max) + s;
         #pragma unroll
-        for (int j = 0; j < NUM_PER_THREAD; j++) {
-            reg_reduce[j] = __hadd(__hmul(reg_reduce[j], __float2half(__expf(pre_max - local_max))), __hmul(reg_input[j], __float2half(scale)));
+        for (int d = 0; d < NUM_PER_THREAD; d++) {
+            reg_reduce[d] = __hadd(__hmul(reg_reduce[d], __float2half(__expf(pre_max - local_max))), __hmul(reg_input[d], __float2half(scale)));
         }
     }
     block.sync();
@@ -430,13 +437,20 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         if (tid == 0) {
             local_max = cluster_local_max;
             int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
-            float* dst_shmem_max = cluster.map_shared_rank(&cluster_local_max, dst_cta);
-            *dst_shmem_max = max(*dst_shmem_max, local_max);
+            dst_shmem = cluster.map_shared_rank(&cluster_local_max, dst_cta);  
+        }
+        cluster.sync();
+        if (tid == 0) {
+            *dst_shmem = fmaxf(*dst_shmem, local_max);
         }
         cluster.sync();
     }
     scale = __expf(pre_max - cluster_local_max);
     local_sum *= scale;
+    #pragma unroll
+    for (int j = 0; j < NUM_PER_THREAD; j++) {
+        reg_reduce[j] = __hmul(reg_reduce[j], __float2half(scale));
+    }
     if(tid == 0) {
         cluster_local_sum = local_sum;
     }
@@ -446,14 +460,17 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         if (tid == 0) {
             local_sum = cluster_local_sum;
             int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
-            float* dst_shmem_sum = cluster.map_shared_rank(&cluster_local_sum, dst_cta);
-            atomicAdd(dst_shmem_sum, local_sum);
+            dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);  
+        }
+        cluster.sync();
+        if (tid == 0) {
+            atomicAdd(dst_shmem, local_sum);
         }
         cluster.sync();
     }
     #pragma unroll
     for (int j = 0; j < NUM_PER_THREAD; j++) {
-        reg_reduce[j] = __hmul(reg_reduce[j], __float2half(scale * __frcp_rn(cluster_local_sum)));
+        reg_reduce[j] = __hmul(reg_reduce[j], __float2half(__frcp_rn(cluster_local_sum)));
     }
     if(tid < NUM_THREAD_PER_ROW_2) {
         *(uint4*)(&local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM + tid * NUM_PER_THREAD]) = *(uint4*)(&reg_reduce[0]);
@@ -553,7 +570,10 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         if (tid == 0) {
             local_sum = cluster_local_sum;
             int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
-            float* dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);
+            dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);  
+        }
+        cluster.sync();
+        if (tid == 0) {
             atomicAdd(dst_shmem, local_sum);
         }
         cluster.sync();
@@ -567,8 +587,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         *(uint4*)(&input_shmem[d]) = *(uint4*)(&reg_input[0]);
     }
     block.sync();
-    // for(int i = 0; i < DIM_PER_BLOCK; i++)
-    //     printf("%f \n", __half2float(input_shmem[i]));
+
     // Compute input @ ffn_gate
     for (int j = 0; j < FFN_DIM_PER_CLUSTER / HEAD_DIM; j++){
         tmp_ffn[j] = 0.0;
@@ -694,9 +713,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         size, tid, HEAD_DIM, cluster_block_id,  
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, local_qkv, weight);
-    // if(head_id == 0 && cluster_block_id == 0 && tid == 0)
-    //     printf("%f, %f, %f, %f \n", __half2float(local_qkv[0]), __half2float(local_qkv[383]), __half2float(local_qkv[384 + 0]), __half2float(local_qkv[384 + 383]));
-
+    
     // Compute up_gate mul and down_proj
     if (tid == 0) {
         cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map_weight_down, cluster_block_st_id, cluster_head_ffn_idx, bar[0]);
@@ -729,7 +746,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
             *(uint4*)(&reg_reduce[0]) = *(uint4*)(&local_qkv[MAX_SMEM_DIM + input_idx_3 + TMA_LOAD_ONCE_MAX + j]);
             #pragma unroll
             for (int d = 0; d < NUM_PER_THREAD; d++) {
-                // printf("%f \n", __half2float(__hmul(reg_input[d], reg_reduce[d])));
                 tmp += __half2float(__hmul(__hmul(reg_input[d], reg_reduce[d]), weight[(id - 1) % 2 * TMA_LOAD_ONCE_NUM_FFN_TOTAL + TMA_LOAD_ONCE_NUM_FFN + (input_idx_3 + j + d) * TMA_LOAD_ONCE + weight_idx_3]));
             }
         }
@@ -767,9 +783,3 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         atomicAdd(&output[cluster_block_st_id + weight_idx_3 + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE], __float2half(tmp));
     }
 }
-
-// void SingleDecoderLayerDispatched(
-
-// ) {
-
-// }

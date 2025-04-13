@@ -1,7 +1,7 @@
 #include <iostream>
 #include "decode_kernel.cuh"
 
-// nvcc --generate-code=arch=compute_90a,code=sm_90a -O3 -std=c++17 -lcuda decode.cu -o test && ./test
+// nvcc --generate-code=arch=compute_90a,code=sm_90a -O3 -std=c++17 -lcuda decode_v9.cu -o test && ./test
 
 int main(int argc, char** argv) {
     cudaFuncSetAttribute(LlamaDecoderLayerKernel, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
@@ -255,8 +255,8 @@ int main(int argc, char** argv) {
     dim3 grid(HEAD_NUM * CLUSTER_SIZE); 
     dim3 block(BLOCK_SIZE);
 
-    int wmup = 1;
-    int test = 0;
+    int wmup = 100;
+    int test = 1000;
     for (int i = 0; i < wmup; i++) {
         LlamaDecoderLayerKernel<<<grid, block, max_shmem_size>>>(
             d_output,
@@ -311,8 +311,8 @@ int main(int argc, char** argv) {
     cudaEventElapsedTime(&ms, st, ed);
     std::cout << "Latency: " << ms / test * 1e3 << " us" << std::endl;
     cudaMemcpy(h_output, reinterpret_cast<void*>(d_output), sizeof(half) * 1 * HIDDEN_DIM, cudaMemcpyDeviceToHost);
-    for (int i = 0; i < HIDDEN_DIM; i++)
-        printf("%f, ", __half2float(h_output[i]));
-    printf("\n");
+    // for (int i = 0; i < HIDDEN_DIM; i++)
+    //     printf("%f, ", __half2float(h_output[i]));
+    // printf("\n");
     return 0;
 }

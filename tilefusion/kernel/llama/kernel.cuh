@@ -437,13 +437,20 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         if (tid == 0) {
             local_max = cluster_local_max;
             int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
-            float* dst_shmem_max = cluster.map_shared_rank(&cluster_local_max, dst_cta);
-            *dst_shmem_max = max(*dst_shmem_max, local_max);
+            dst_shmem = cluster.map_shared_rank(&cluster_local_max, dst_cta);  
+        }
+        cluster.sync();
+        if (tid == 0) {
+            *dst_shmem = fmaxf(*dst_shmem, local_max);
         }
         cluster.sync();
     }
     scale = __expf(pre_max - cluster_local_max);
     local_sum *= scale;
+    #pragma unroll
+    for (int j = 0; j < NUM_PER_THREAD; j++) {
+        reg_reduce[j] = __hmul(reg_reduce[j], __float2half(scale));
+    }
     if(tid == 0) {
         cluster_local_sum = local_sum;
     }
@@ -463,7 +470,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     }
     #pragma unroll
     for (int j = 0; j < NUM_PER_THREAD; j++) {
-        reg_reduce[j] = __hmul(reg_reduce[j], __float2half(scale * __frcp_rn(cluster_local_sum)));
+        reg_reduce[j] = __hmul(reg_reduce[j], __float2half(__frcp_rn(cluster_local_sum)));
     }
     if(tid < NUM_THREAD_PER_ROW_2) {
         *(uint4*)(&local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM + tid * NUM_PER_THREAD]) = *(uint4*)(&reg_reduce[0]);

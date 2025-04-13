@@ -73,17 +73,15 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     const __grid_constant__ CUtensorMap tensor_map_kv_cache, // seqlen * mla_head_dim
     const __grid_constant__ CUtensorMap tensor_map_kv_cache_, // seqlen * mla_head_dim
     const __grid_constant__ CUtensorMap tensor_map_weight_uv, // kv_lora_rank * (head_num * nope_head_dim)
-    const __grid_constant__ CUtensorMap tensor_map_weight_o
-)
-{
-    namespace cg = cooperative_groups;
+    const __grid_constant__ CUtensorMap tensor_map_weight_o // (head_num * nope_head_dim) * hidden_dim
+) {
     cg::grid_group grid             = cg::this_grid();
     cg::cluster_group cluster       = cg::this_cluster();
     cg::thread_block block          = cg::this_thread_block();
     const uint32_t head_id          = grid.cluster_rank();
     const uint32_t cluster_block_id = cluster.block_rank();
     const uint32_t tid              = block.thread_rank();
-    const uint32_t lane_id = tid % WARP_SIZE; // 32 per warp
+    const uint32_t lane_id = tid % WARP_SIZE; 
     const uint32_t warp_id = tid / WARP_SIZE;
     const uint32_t tile_row = tid / NUM_THREAD_PER_ROW_3;
     const uint32_t tile_col = tid % NUM_THREAD_PER_ROW_3;
@@ -98,6 +96,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     // Init registers
     float local_sum = 0.0, eps = 1e-6, rms_rcp = 0.0, tmp = 0.0, local_max = 0.0, pre_max = 0.0, scale = 0.0, softmax_scale = __frsqrt_rn(HEAD_DIM);
     half __align__(16) reg_input[NUM_PER_THREAD], reg_weight[NUM_PER_THREAD], reg_reduce[NUM_PER_THREAD];
+    float* dst_shmem;
     half2 q_rope, q_rope_1, k_rope, k_rope_1;
     float2 cos_reg, sin_reg;
     uint32_t size;
@@ -158,6 +157,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     for (int mask = NUM_WARPS / 2; mask > 0; mask >>= 1) {
         local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
     } 
+    block.sync();
     if (tid == 0)
         cluster_local_sum = local_sum;
     cluster.sync();
@@ -166,7 +166,10 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         if (tid == 0) {
             local_sum = cluster_local_sum;
             int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
-            float* dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);
+            dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);  
+        }
+        cluster.sync();
+        if (tid == 0) {
             atomicAdd(dst_shmem, local_sum);
         }
         cluster.sync();
@@ -202,7 +205,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
             *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + (id - 1) * TMA_LOAD_ONCE + i]);
             #pragma unroll
             for (int d = 0; d < NUM_PER_THREAD; d++) {
-                tmp += __half2float(reg_input[d] * weight[((id - 1) % 2) * TMA_LOAD_ONCE_NUM + (input_idx + i + d) * NOPE_HEAD_DIM + weight_idx]);
+                tmp += __half2float(__hmul(reg_input[d], weight[((id - 1) % 2) * TMA_LOAD_ONCE_NUM + (input_idx + i + d) * NOPE_HEAD_DIM + weight_idx]));
             }
         }
     }
@@ -211,7 +214,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + (DIM_PER_BLOCK - TMA_LOAD_ONCE) + i]);
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
-            tmp += __half2float(reg_input[d] * weight[TMA_LOAD_ONCE_NUM + (input_idx + i + d) * NOPE_HEAD_DIM + weight_idx]);
+            tmp += __half2float(__hmul(reg_input[d], weight[TMA_LOAD_ONCE_NUM + (input_idx + i + d) * NOPE_HEAD_DIM + weight_idx]));
         }
     }
     if (lane_id % NUM_THREAD_PER_ROW == 0) {
@@ -240,7 +243,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
             *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx_2 + (id - 1) * 128 + i]);
             #pragma unroll
             for (int d = 0; d < NUM_PER_THREAD; d++) {
-                tmp += __half2float(reg_input[d] * weight[((id - 1) % 2) * TMA_LOAD_ONCE_NUM + (input_idx_2 + i + d) * ROPE_HEAD_DIM + weight_idx_2]);
+                tmp += __half2float(__hmul(reg_input[d], weight[((id - 1) % 2) * TMA_LOAD_ONCE_NUM + (input_idx_2 + i + d) * ROPE_HEAD_DIM + weight_idx_2]));
             }
         }
     }
@@ -249,7 +252,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx_2 + (DIM_PER_BLOCK - 128) + i]);
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
-            tmp += __half2float(reg_input[d] * weight[TMA_LOAD_ONCE_NUM + (input_idx_2 + i + d) * ROPE_HEAD_DIM + weight_idx_2]);
+            tmp += __half2float(__hmul(reg_input[d], weight[TMA_LOAD_ONCE_NUM + (input_idx_2 + i + d) * ROPE_HEAD_DIM + weight_idx_2]));
         }
     }
     #pragma unroll
@@ -283,7 +286,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
                 *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + (id - 1) * TMA_LOAD_ONCE + i]);
                 #pragma unroll
                 for (int d = 0; d < NUM_PER_THREAD; d++) {
-                    tmp += __half2float(reg_input[d] * weight[((id - 1) % 2) * TMA_LOAD_ONCE_NUM + (input_idx + i + d) * 128 + weight_idx]);
+                    tmp += __half2float(__hmul(reg_input[d], weight[((id - 1) % 2) * TMA_LOAD_ONCE_NUM + (input_idx + i + d) * 128 + weight_idx]));
                 }
             }
         }
@@ -292,7 +295,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
             *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + (DIM_PER_BLOCK - TMA_LOAD_ONCE) + i]);
             #pragma unroll
             for (int d = 0; d < NUM_PER_THREAD; d++) {
-                tmp += __half2float(reg_input[d] * weight[TMA_LOAD_ONCE_NUM + (input_idx + i + d) * 128 + weight_idx]);
+                tmp += __half2float(__hmul(reg_input[d], weight[TMA_LOAD_ONCE_NUM + (input_idx + i + d) * 128 + weight_idx]));
             }
         }
         if (lane_id % NUM_THREAD_PER_ROW == 0) {
@@ -300,8 +303,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         }
     }
     block.sync();
-    // if(cluster_block_id == 0 && head_id == 0 && tid == 0)
-    //     printf("%f, %f \n", __half2float(local_qkv[MLA_HEAD_DIM]), __half2float(local_qkv[MLA_HEAD_DIM + 511]));
+
     // Compute input @ w_k_pe
     if (tid == 0) {
         cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map_weight_k_pe, 0, cluster_block_st_idx, bar[0]);
@@ -323,7 +325,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
             *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx_2 + (id - 1) * 128 + i]);
             #pragma unroll
             for (int d = 0; d < NUM_PER_THREAD; d++) {
-                tmp += __half2float(reg_input[d] * weight[((id - 1) % 2) * TMA_LOAD_ONCE_NUM + (input_idx_2 + i + d) * ROPE_HEAD_DIM + weight_idx_2]);
+                tmp += __half2float(__hmul(reg_input[d], weight[((id - 1) % 2) * TMA_LOAD_ONCE_NUM + (input_idx_2 + i + d) * ROPE_HEAD_DIM + weight_idx_2]));
             }
         }
     }
@@ -332,7 +334,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx_2 + (DIM_PER_BLOCK - 128) + i]);
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
-            tmp += __half2float(reg_input[d] * weight[TMA_LOAD_ONCE_NUM + (input_idx_2 + i + d) * ROPE_HEAD_DIM + weight_idx_2]);
+            tmp += __half2float(__hmul(reg_input[d], weight[TMA_LOAD_ONCE_NUM + (input_idx_2 + i + d) * ROPE_HEAD_DIM + weight_idx_2]));
         }
     }
     #pragma unroll
@@ -343,8 +345,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         local_qkv[MLA_HEAD_DIM + KV_LORA_RANK + warp_id * NUM_ROW_PER_WARP_2 + lane_id / NUM_THREAD_PER_ROW_2] = __float2half(tmp);
     }
     block.sync();
-    // if(cluster_block_id == 0 && head_id == 0 && tid == 0)
-    //     printf("%f, %f \n", __half2float(local_qkv[MLA_HEAD_DIM+512]), __half2float(local_qkv[MLA_HEAD_DIM + 512+63]));
+
     // DSM All-reduce
     size = MLA_HEAD_DIM * 2 * sizeof(half);
     src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_qkv));
@@ -353,15 +354,14 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         size, tid, BLOCK_SIZE * 8, cluster_block_id,  
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, local_qkv, weight);
-    // if(cluster_block_id == 0 && head_id == 0 && tid == 0)
-    //     printf("%f, %f, %f, %f \n", __half2float(local_qkv[0]), __half2float(local_qkv[127]), __half2float(local_qkv[576 + 0]), __half2float(local_qkv[576 + 575]));
+
     // Compute partial RoPE
     if (tid < ROPE_HEAD_DIM / 2) {
         q_rope = *(half2*)(&local_qkv[KV_LORA_RANK + tid * 2]);
         k_rope = *(half2*)(&local_qkv[MLA_HEAD_DIM + KV_LORA_RANK + tid * 2]);
         if (tid * 2 < ROPE_HEAD_DIM / 2) {
-            q_rope_1 = *(half2*)(&local_qkv[MLA_HEAD_DIM / 2 + tid * 2]);
-            k_rope_1 = *(half2*)(&local_qkv[MLA_HEAD_DIM + MLA_HEAD_DIM / 2 + tid * 2]);
+            q_rope_1 = *(half2*)(&local_qkv[KV_LORA_RANK + ROPE_HEAD_DIM / 2 + tid * 2]);
+            k_rope_1 = *(half2*)(&local_qkv[MLA_HEAD_DIM + ROPE_HEAD_DIM / 2 + tid * 2]);
             cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
             sin_reg = {-sin[ROPE_HEAD_DIM / 2 + tid * 2], -sin[ROPE_HEAD_DIM / 2 + tid * 2 + 1]};
         } else {
@@ -373,8 +373,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         *(half2*)(&local_qkv[KV_LORA_RANK + tid * 2]) = __hadd2(__hmul2(q_rope, __float22half2_rn(cos_reg)), __hmul2(q_rope_1, __float22half2_rn(sin_reg)));
         *(half2*)(&local_qkv[MLA_HEAD_DIM + KV_LORA_RANK + tid * 2]) = __hadd2(__hmul2(k_rope, __float22half2_rn(cos_reg)), __hmul2(k_rope_1, __float22half2_rn(sin_reg)));
     }
-    // if(cluster_block_id == 0 && head_id == 0 && tid == 0)
-    //     printf("%f, %f, %f, %f \n", __half2float(local_qkv[0]), __half2float(local_qkv[127]), __half2float(local_qkv[576 + 0]), __half2float(local_qkv[576 + 575]));
+
     // RMSNorm
     local_sum = 0.0;
     for (int d = tid * 4; d < KV_LORA_RANK; d+=BLOCK_SIZE * 4) { 
@@ -398,28 +397,17 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     } 
     if (tid == 0)
         cluster_local_sum = local_sum;
-    cluster.sync();
-    // DSM Ring All-reduce
-    for (int i = 1; i < cluster.num_blocks() - 1; i++) {
-        if (tid == 0) {
-            local_sum = cluster_local_sum;
-            int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
-            float* dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);
-            atomicAdd(dst_shmem, local_sum);
-        }
-        cluster.sync();
-    }
+    block.sync();
     rms_rcp = __frsqrt_rn(cluster_local_sum / KV_LORA_RANK + eps);
     for (int d = tid * 4; d < KV_LORA_RANK; d+=BLOCK_SIZE * 4) { 
-        *(uint64_t*)(&reg_weight[0]) = *(uint64_t*)(&w_rms_input[cluster_block_st_idx + d]);
+        *(uint64_t*)(&reg_weight[0]) = *(uint64_t*)(&w_rms_ckv[d]);
         for (int i = 0; i < 4; i++) {
             reg_input[i] = __float2half(__half2float(reg_input[i]) * rms_rcp * __half2float(reg_weight[i]));
         }
         *(uint64_t*)(&local_qkv[MLA_HEAD_DIM + d]) = *(uint64_t*)(&reg_input[0]);
     }
     block.sync();
-    // if(cluster_block_id == 0 && head_id == 0 && tid == 0)
-    //     printf("%f, %f, %f, %f \n", __half2float(local_qkv[0]), __half2float(local_qkv[127]), __half2float(local_qkv[576 + 0]), __half2float(local_qkv[576 + 575]));
+    
     // Compute q @ w_uk
     if (tid == 0) {
         cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map_weight_uk, cluster_head_uk_idx, 0, bar[0]);
@@ -441,7 +429,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
             *(uint4*)(&reg_input[0]) = *(uint4*)(&local_qkv[input_idx + (id - 1) * TMA_LOAD_ONCE + i]);
             #pragma unroll
             for (int d = 0; d < NUM_PER_THREAD; d++) {
-                tmp += __half2float(reg_input[d] * weight[((id - 1) % 2) * TMA_LOAD_ONCE_NUM + (input_idx + i + d) * 128 + weight_idx]);
+                tmp += __half2float(__hmul(reg_input[d], weight[((id - 1) % 2) * TMA_LOAD_ONCE_NUM + (input_idx + i + d) * 128 + weight_idx]));
             }
         }
     }
@@ -450,7 +438,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         *(uint4*)(&reg_input[0]) = *(uint4*)(&local_qkv[input_idx + (NOPE_HEAD_DIM - TMA_LOAD_ONCE) + i]);
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
-            tmp += __half2float(reg_input[d] * weight[TMA_LOAD_ONCE_NUM + (input_idx + i + d) * 128 + weight_idx]);
+            tmp += __half2float(__hmul(reg_input[d], weight[TMA_LOAD_ONCE_NUM + (input_idx + i + d) * 128 + weight_idx]));
         }
     }
     if (lane_id % NUM_THREAD_PER_ROW == 0) {
@@ -466,8 +454,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         size, tid, 0, cluster_block_id,  
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, local_qkv, local_qkv);
-    // if(cluster_block_id == 0 && head_id == 0 && tid == 0)
-    //     printf("%f, %f, %f, %f \n", __half2float(local_qkv[512 + 0]), __half2float(local_qkv[512+63]), __half2float(local_qkv[576 + 0]), __half2float(local_qkv[576 + 511]));
 
     // Compute flash-decoding
     local_sum = 0.0f;
@@ -494,7 +480,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
             token[id % 2] = bar[id % 2].arrive();
         }
         bar[(id - 1) % 2].wait(std::move(token[(id - 1) % 2]));
-        // printf("%f \n", __half2float(weight[0]));
         pre_max = local_max;
         #pragma unroll
         for (int j = 0; j < DEC_TILE; j++) {
@@ -502,26 +487,22 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
             qk[j] = 0.0f;
             #pragma unroll
             for (int d = 0; d < NUM_PER_THREAD; d++) {
-                // if (j == 0 && id == 63 && cluster_block_id == 0 && head_id == 0 && tid == 0)
-                //     printf("%f, %f \n", __half2float(reg_input[d]), __half2float(reg_weight[d]));
                 qk[j] += __half2float(__hmul(reg_input[d], reg_weight[d]));
             }
-            // printf("%f \n", __half2float(reg_weight[0]));
             #pragma unroll
             for (int mask = 16; mask > 0; mask >>= 1) {
-                qk[j] += __shfl_down_sync(0xffffffff, qk[j], mask);
+                qk[j] += __shfl_xor_sync(0xffffffff, qk[j], mask);
             }
+            block.sync();
             if (lane_id == 0)
                 reduction[warp_id] = qk[j];
             block.sync();
-            if (warp_id / 2)
+            if (tile_row == 1)
                 qk[j] += reduction[2 + (warp_id + 1) % 2];
             else
                 qk[j] += reduction[(warp_id + 1) % 2];
-            // printf("%f \n", qk[j]);
             qk[j] = qk[j] * softmax_scale;
-            // printf("%f \n", qk[j]);
-            local_max = max(local_max, qk[j]);
+            local_max = fmaxf(local_max, qk[j]);
         }
         scale = __expf(pre_max - local_max);
         local_sum *= scale;
@@ -534,6 +515,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         for (int j = 0; j < NUM_PER_THREAD; j++) {
             reg_reduce[j] = __hmul(reg_reduce[j], __float2half(scale));
         }
+        #pragma unroll
         for (int j = 0; j < DEC_TILE; j++) {
             *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight[((id - 1) % 2) * TMA_LOAD_ONCE_NUM_ATTN + (warp_id % 2) * TMA_LOAD_ONCE_NUM_ATTN / 2 + (weight_idx_3 + j) * KV_LORA_RANK / 2 + lane_id * NUM_PER_THREAD]);
             #pragma unroll
@@ -546,8 +528,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     pre_max = local_max;
     #pragma unroll
     for (int j = 0; j < DEC_TILE; j++) {
-        if (cluster_block_id == CLUSTER_SIZE - 1 && (warp_id / 2) && j == DEC_TILE - 1)
-            *(uint4*)(&reg_weight[0]) = *(uint4*)(&local_qkv[MLA_HEAD_DIM + lane_id * NUM_PER_THREAD]);
+        if (cluster_block_id == CLUSTER_SIZE - 1 && tile_row == 1 && j == DEC_TILE - 1)
+            *(uint4*)(&reg_weight[0]) = *(uint4*)(&local_qkv[MLA_HEAD_DIM + input_idx_3]);
         else
             *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight[TMA_LOAD_ONCE_NUM_ATTN + (warp_id % 2) * TMA_LOAD_ONCE_NUM_ATTN / 2 + (weight_idx_3 + j) * KV_LORA_RANK / 2 + lane_id * NUM_PER_THREAD]);
         qk[j] = 0.0f;
@@ -557,26 +539,22 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         }
         #pragma unroll
         for (int mask = 16; mask > 0; mask >>= 1) {
-            qk[j] += __shfl_down_sync(0xffffffff, qk[j], mask);
+            qk[j] += __shfl_xor_sync(0xffffffff, qk[j], mask);
         }
         if (lane_id == 0)
             reduction[warp_id] = qk[j];
         block.sync();
-        if (warp_id / 2)
+        if (tile_row == 1)
             qk[j] += reduction[2 + (warp_id + 1) % 2];
         else
             qk[j] += reduction[(warp_id + 1) % 2];
-        // if (cluster_block_id == CLUSTER_SIZE - 1 && (warp_id / 2) && j == DEC_TILE - 1)
-        //     printf("%f \n", qk[j]);
         qk[j] = qk[j] * softmax_scale;
-        local_max = max(local_max, qk[j]);
+        local_max = fmaxf(local_max, qk[j]);
     }
     scale = __expf(pre_max - local_max);
     local_sum *= scale;
     #pragma unroll
     for (int j = 0; j < DEC_TILE; j++) {
-        // if (cluster_block_id == CLUSTER_SIZE - 1 && (warp_id / 2) && j == DEC_TILE - 1)
-        //     printf("%f, %f, %f \n", qk[j], local_max, __expf(qk[j] - local_max));
         qk[j] = __expf(qk[j] - local_max);
         local_sum += qk[j];
     }
@@ -584,11 +562,10 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     for (int j = 0; j < NUM_PER_THREAD; j++) {
         reg_reduce[j] = __hmul(reg_reduce[j], __float2half(scale));
     }
+    #pragma unroll
     for (int j = 0; j < DEC_TILE; j++) {
-        if (cluster_block_id == CLUSTER_SIZE - 1 && (warp_id / 2) && j == DEC_TILE - 1) {
-            *(uint4*)(&reg_weight[0]) = *(uint4*)(&local_qkv[MLA_HEAD_DIM + lane_id * NUM_PER_THREAD]);
-            // printf("%f \n", __half2float(reg_weight[0]));
-        }
+        if (cluster_block_id == CLUSTER_SIZE - 1 && tile_row == 1 && j == DEC_TILE - 1)
+            *(uint4*)(&reg_weight[0]) = *(uint4*)(&local_qkv[MLA_HEAD_DIM + input_idx_3]);
         else
             *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight[TMA_LOAD_ONCE_NUM_ATTN + (warp_id % 2) * TMA_LOAD_ONCE_NUM_ATTN / 2 + (weight_idx_3 + j) * KV_LORA_RANK / 2 + lane_id * NUM_PER_THREAD]);
         #pragma unroll
@@ -612,18 +589,16 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         *(uint4*)(&reg_input[0]) = *(uint4*)(&weight[j * MLA_HEAD_DIM + tile_col * NUM_PER_THREAD]);
         float m = reduction[j * 2], s = reduction[j * 2 + 1];
         pre_max = local_max;
-        local_max = max(m, local_max);
+        local_max = fmaxf(m, local_max);
         scale = __expf(m - local_max);
         s *= scale;
         local_sum = local_sum * __expf(pre_max - local_max) + s;
         #pragma unroll
-        for (int j = 0; j < NUM_PER_THREAD; j++) {
-            reg_reduce[j] = __hadd(__hmul(reg_reduce[j], __float2half(__expf(pre_max - local_max))), __hmul(reg_input[j], __float2half(scale)));
+        for (int d = 0; d < NUM_PER_THREAD; d++) {
+            reg_reduce[d] = __hadd(__hmul(reg_reduce[d], __float2half(__expf(pre_max - local_max))), __hmul(reg_input[d], __float2half(scale)));
         }
     }
     block.sync();
-    // if(cluster_block_id == 3 && head_id == 0 && tid == 0)
-    //     printf("%f, %f \n", local_max, local_sum);
     pre_max = local_max;
     if(tid == 0) {
         cluster_local_max = local_max;
@@ -634,13 +609,20 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         if (tid == 0) {
             local_max = cluster_local_max;
             int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
-            float* dst_shmem_max = cluster.map_shared_rank(&cluster_local_max, dst_cta);
-            *dst_shmem_max = max(*dst_shmem_max, local_max);
+            dst_shmem = cluster.map_shared_rank(&cluster_local_max, dst_cta);  
+        }
+        cluster.sync();
+        if (tid == 0) {
+            *dst_shmem = fmaxf(*dst_shmem, local_max);
         }
         cluster.sync();
     }
     scale = __expf(pre_max - cluster_local_max);
     local_sum *= scale;
+    #pragma unroll
+    for (int j = 0; j < NUM_PER_THREAD; j++) {
+        reg_reduce[j] = __hmul(reg_reduce[j], __float2half(scale));
+    }
     if(tid == 0) {
         cluster_local_sum = local_sum;
     }
@@ -650,23 +632,23 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         if (tid == 0) {
             local_sum = cluster_local_sum;
             int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
-            float* dst_shmem_sum = cluster.map_shared_rank(&cluster_local_sum, dst_cta);
-            atomicAdd(dst_shmem_sum, local_sum);
+            dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);  
+        }
+        cluster.sync();
+        if (tid == 0) {
+            atomicAdd(dst_shmem, local_sum);
         }
         cluster.sync();
     }
-    // if(cluster_block_id == 3 && head_id == 0 && tid == 0)
-    //     printf("%f, %f \n", local_max, local_sum);
     #pragma unroll
     for (int j = 0; j < NUM_PER_THREAD; j++) {
-        reg_reduce[j] = __hmul(reg_reduce[j], __float2half(scale * __frcp_rn(cluster_local_sum)));
+        reg_reduce[j] = __hmul(reg_reduce[j], __float2half(__frcp_rn(cluster_local_sum)));
     }
     if(tid < NUM_THREAD_PER_ROW_3) {
         *(uint4*)(&local_qkv[tid * NUM_PER_THREAD]) = *(uint4*)(&reg_reduce[0]);
     }
     block.sync();
- 
-    // output reduce throught DSM
+    // DSM Ring All-reduce
     size = KV_LORA_RANK * sizeof(half);
     src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_qkv));
     dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(weight));
@@ -674,9 +656,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         size, tid, KV_LORA_RANK, cluster_block_id,  
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, local_qkv, weight);
-    // if(head_id == 0 && cluster_block_id == 1 && tid == 0)
-    //     printf("%f, %f \n", __half2float(local_qkv[0]), __half2float(local_qkv[511]));
-
+    
     // Compute output @ w_uv
     if (tid == 0) {
         cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map_weight_uv, cluster_head_idx, cluster_block_st_uv_idx, bar[0]);
@@ -698,7 +678,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
             *(uint4*)(&reg_input[0]) = *(uint4*)(&local_qkv[cluster_block_st_uv_idx + input_idx + (id - 1) * TMA_LOAD_ONCE + i]);
             #pragma unroll
             for (int d = 0; d < NUM_PER_THREAD; d++) {
-                tmp += __half2float(reg_input[d] * weight[((id - 1) % 2) * TMA_LOAD_ONCE_NUM + (input_idx + i + d) * 128 + weight_idx]);
+                tmp += __half2float(__hmul(reg_input[d], weight[((id - 1) % 2) * TMA_LOAD_ONCE_NUM + (input_idx + i + d) * 128 + weight_idx]));
             }
         }
     }
@@ -707,7 +687,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         *(uint4*)(&reg_input[0]) = *(uint4*)(&local_qkv[cluster_block_st_uv_idx + input_idx + (NOPE_HEAD_DIM - TMA_LOAD_ONCE) + i]);
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
-            tmp += __half2float(reg_input[d] * weight[TMA_LOAD_ONCE_NUM + (input_idx + i + d) * 128 + weight_idx]);
+            tmp += __half2float(__hmul(reg_input[d], weight[TMA_LOAD_ONCE_NUM + (input_idx + i + d) * 128 + weight_idx]));
         }
     }
     if (lane_id % NUM_THREAD_PER_ROW == 0) {
@@ -722,8 +702,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         size, tid, NOPE_HEAD_DIM, cluster_block_id,  
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, local_qkv, weight);
-    // if(head_id == 0 && cluster_block_id == 1 && tid == 0)
-    //     printf("%f, %f \n", __half2float(local_qkv[0]), __half2float(local_qkv[127]));
+
     // Compute output @ w_o
     // Preload w_o
     if (tid == 0) {
@@ -1104,7 +1083,7 @@ int main(int argc, char** argv) {
     dim3 block(BLOCK_SIZE);
 
     int wmup = 100;
-    int test = 100;
+    int test = 1000;
     for (int i = 0; i < wmup; i++) {
         single_decode<<<grid, block>>>(
             d_output,
