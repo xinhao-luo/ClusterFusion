@@ -5,6 +5,7 @@
 #define FFN_DIM 12288   
 #define HIDDEN_DIM 4096 
 #define SEQ_LEN 4096
+#define BATCH_SIZE 16
 
 #define NUM_WARPS 4 // 4 8 16 32
 #define WARP_SIZE 32
