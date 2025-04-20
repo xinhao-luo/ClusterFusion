@@ -12,15 +12,16 @@ extra_compile_args = {
 }
 
 setup(
-    name="tilefusion",
+    name="distfusion",
     packages=find_packages(),
     ext_modules=[
         CUDAExtension(
-            name="tilefusion",
+            name="distfusion",
             sources=[
                 "pybind.cpp",
                 "kernel/llama/llama_kernel_dispatch.cu",
                 "kernel/deepseek/deepseek_kernel_dispatch.cu",
+                "kernel/Norm/norm_kernel_dispatch.cu",
             ],
             extra_compile_args=extra_compile_args,
             libraries=["cuda", "cudart"],

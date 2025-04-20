@@ -277,96 +277,96 @@ __global__ void single_decode_kernel(
     // #------------------------------------------------------------------------
     // # RMS Norm
     // #------------------------------------------------------------------------
-    float* global_rms_reduction = reinterpret_cast<float*>(global_reduce);
-    float local_sum = 0.0f;
-    if (MISALIGNED) {
-        __align__(16) half embedding_reg[EMBEDDING_TILE_IN_THREAD];
-        #pragma unroll
-        for (int di = 0; di < EMBEDDING_TILE_IN_THREAD / 8; di++) {
-            *(uint4 * )(&embedding_reg[8 * di]) = *(uint4 * )(&input_shmem[tid * EMBEDDING_TILE_IN_THREAD + 8 * di]);
-        }
-        if(head_idx == 0) {
-            #pragma unroll
-            for (int di = 0; di < EMBEDDING_TILE_IN_THREAD; di++) {
-                local_sum += __half2float(embedding_reg[di]) * __half2float(embedding_reg[di]);
-            }
-            #pragma unroll
-            for (int mask = (WARP_SIZE>>1); mask > 0; mask >>= 1) {
-                local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
-            }
-            if (lane_id == 0){
-                block_reduce_float[warp_id] = local_sum;
-            }
-            block.sync(); 
-            if (tid < NUM_WARPS) {
-                local_sum = block_reduce_float[tid];
-            }
-            #pragma unroll
-            for (int mask = (NUM_WARPS>>1); mask > 0; mask >>= 1) {
-                local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
-            }
-            if (tid == 0) {
-                global_rms_reduction[cluster_block_id] = local_sum;
-            }
-        }
-        grid.sync();
-        rms_norm(embedding_reg, w_rms_input, FAKE_CLUSTER_SIZE, block_reduce_float, global_rms_reduction);
-        // store to shared memory
-        #pragma unroll
-        for (int di = 0; di < EMBEDDING_TILE_IN_THREAD / 8; di++) {
-            *(uint4 * )(&input_shmem[tid * EMBEDDING_TILE_IN_THREAD + 8 * di]) = *(uint4 * )(&embedding_reg[8 * di]);
-        }
-        block.sync();
-    } else {
-        half __align__(16) reg_input_norm[2], reg_weight_norm[2];
-        for (int d = tid * 2; d < EMBEDDING_TILE_LENGTH; d+=BLOCK_SIZE * 2) { 
-            *(half2*)(&reg_input_norm[0]) = *(half2*)(&input_shmem[d]);
-            for (int di = 0; di < 2; di++)
-                local_sum += __half2float(__hmul(reg_input_norm[di], reg_input_norm[di]));
-        }
-        #pragma unroll
-        for (int mask = (WARP_SIZE>>1); mask > 0; mask >>= 1) {
-            local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
-        }
-        if (lane_id == 0){
-            block_reduce_float[warp_id] = local_sum;
-        }
-        block.sync(); 
-        if (tid < NUM_WARPS) {
-            local_sum = block_reduce_float[tid];
-        }
-        #pragma unroll
-        for (int mask = (NUM_WARPS>>1); mask > 0; mask >>= 1) {
-            local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
-        }
-        if (tid == 0) {
-            global_rms_reduction[FAKE_CLUSTER_SIZE * head_idx + cluster_block_id] = local_sum;
-        }
-        grid.sync();
-        // Reduce through Global
-        if (warp_id == 0) {
-            if (lane_id < FAKE_CLUSTER_SIZE) {
-                local_sum = global_rms_reduction[FAKE_CLUSTER_SIZE * head_idx + lane_id];
-            }
-            #pragma unroll
-            for (int stride = (FAKE_CLUSTER_SIZE>>1); stride > 0; stride >>= 1) {
-                local_sum += __shfl_down_sync(0xffffffff, local_sum, stride);
-            }
-            if (lane_id == 0){
-                block_reduce_float[0] = local_sum;
-            }
-        }
-        block.sync();
-        half rms_rcp =  __float2half(1.f / (std::sqrt(block_reduce_float[0] / float(HIDDEN_DIM))) + eps);
-        for (int d = tid * 2; d < EMBEDDING_TILE_LENGTH; d+=BLOCK_SIZE * 2) { 
-            *(half2*)(&reg_input_norm[0]) = *(half2*)(&input_shmem[d]);
-            *(half2*)(&reg_input_norm[0]) = __hmul2(*(half2*)(&reg_input_norm[0]), {rms_rcp, rms_rcp});
-            // (shihan): The current H100 kernel uses `*(half2*)(&w_rms_input[d])`. Fix it if you consider it a bug.
-            *(half2*)(&reg_weight_norm[0]) = *(half2*)(&w_rms_input[EMBEDDING_TILE_LENGTH * cluster_block_id + d]);
-            *(half2*)(&input_shmem[d]) = __hmul2(*(half2*)(&reg_input_norm[0]), *(half2*)(&reg_weight_norm[0]));
-        }
-        block.sync();
-    }
+    // float* global_rms_reduction = reinterpret_cast<float*>(global_reduce);
+    // float local_sum = 0.0f;
+    // if (MISALIGNED) {
+    //     __align__(16) half embedding_reg[EMBEDDING_TILE_IN_THREAD];
+    //     #pragma unroll
+    //     for (int di = 0; di < EMBEDDING_TILE_IN_THREAD / 8; di++) {
+    //         *(uint4 * )(&embedding_reg[8 * di]) = *(uint4 * )(&input_shmem[tid * EMBEDDING_TILE_IN_THREAD + 8 * di]);
+    //     }
+    //     if(head_idx == 0) {
+    //         #pragma unroll
+    //         for (int di = 0; di < EMBEDDING_TILE_IN_THREAD; di++) {
+    //             local_sum += __half2float(embedding_reg[di]) * __half2float(embedding_reg[di]);
+    //         }
+    //         #pragma unroll
+    //         for (int mask = (WARP_SIZE>>1); mask > 0; mask >>= 1) {
+    //             local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
+    //         }
+    //         if (lane_id == 0){
+    //             block_reduce_float[warp_id] = local_sum;
+    //         }
+    //         block.sync(); 
+    //         if (tid < NUM_WARPS) {
+    //             local_sum = block_reduce_float[tid];
+    //         }
+    //         #pragma unroll
+    //         for (int mask = (NUM_WARPS>>1); mask > 0; mask >>= 1) {
+    //             local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
+    //         }
+    //         if (tid == 0) {
+    //             global_rms_reduction[cluster_block_id] = local_sum;
+    //         }
+    //     }
+    //     grid.sync();
+    //     rms_norm(embedding_reg, w_rms_input, FAKE_CLUSTER_SIZE, block_reduce_float, global_rms_reduction);
+    //     // store to shared memory
+    //     #pragma unroll
+    //     for (int di = 0; di < EMBEDDING_TILE_IN_THREAD / 8; di++) {
+    //         *(uint4 * )(&input_shmem[tid * EMBEDDING_TILE_IN_THREAD + 8 * di]) = *(uint4 * )(&embedding_reg[8 * di]);
+    //     }
+    //     block.sync();
+    // } else {
+    //     half __align__(16) reg_input_norm[2], reg_weight_norm[2];
+    //     for (int d = tid * 2; d < EMBEDDING_TILE_LENGTH; d+=BLOCK_SIZE * 2) { 
+    //         *(half2*)(&reg_input_norm[0]) = *(half2*)(&input_shmem[d]);
+    //         for (int di = 0; di < 2; di++)
+    //             local_sum += __half2float(__hmul(reg_input_norm[di], reg_input_norm[di]));
+    //     }
+    //     #pragma unroll
+    //     for (int mask = (WARP_SIZE>>1); mask > 0; mask >>= 1) {
+    //         local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
+    //     }
+    //     if (lane_id == 0){
+    //         block_reduce_float[warp_id] = local_sum;
+    //     }
+    //     block.sync(); 
+    //     if (tid < NUM_WARPS) {
+    //         local_sum = block_reduce_float[tid];
+    //     }
+    //     #pragma unroll
+    //     for (int mask = (NUM_WARPS>>1); mask > 0; mask >>= 1) {
+    //         local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
+    //     }
+    //     if (tid == 0) {
+    //         global_rms_reduction[FAKE_CLUSTER_SIZE * head_idx + cluster_block_id] = local_sum;
+    //     }
+    //     grid.sync();
+    //     // Reduce through Global
+    //     if (warp_id == 0) {
+    //         if (lane_id < FAKE_CLUSTER_SIZE) {
+    //             local_sum = global_rms_reduction[FAKE_CLUSTER_SIZE * head_idx + lane_id];
+    //         }
+    //         #pragma unroll
+    //         for (int stride = (FAKE_CLUSTER_SIZE>>1); stride > 0; stride >>= 1) {
+    //             local_sum += __shfl_down_sync(0xffffffff, local_sum, stride);
+    //         }
+    //         if (lane_id == 0){
+    //             block_reduce_float[0] = local_sum;
+    //         }
+    //     }
+    //     block.sync();
+    //     half rms_rcp =  __float2half(1.f / (std::sqrt(block_reduce_float[0] / float(HIDDEN_DIM))) + eps);
+    //     for (int d = tid * 2; d < EMBEDDING_TILE_LENGTH; d+=BLOCK_SIZE * 2) { 
+    //         *(half2*)(&reg_input_norm[0]) = *(half2*)(&input_shmem[d]);
+    //         *(half2*)(&reg_input_norm[0]) = __hmul2(*(half2*)(&reg_input_norm[0]), {rms_rcp, rms_rcp});
+    //         // (shihan): The current H100 kernel uses `*(half2*)(&w_rms_input[d])`. Fix it if you consider it a bug.
+    //         *(half2*)(&reg_weight_norm[0]) = *(half2*)(&w_rms_input[EMBEDDING_TILE_LENGTH * cluster_block_id + d]);
+    //         *(half2*)(&input_shmem[d]) = __hmul2(*(half2*)(&reg_input_norm[0]), *(half2*)(&reg_weight_norm[0]));
+    //     }
+    //     block.sync();
+    // }
     
     // #------------------------------------------------------------------------
     // # W_q | W_k x ([(head_num x head_dim) x hidden_dim])
@@ -431,27 +431,27 @@ __global__ void single_decode_kernel(
     block.sync();
 
     // rope
-    half2 q_rope, q_rope_1;
-    half2 k_rope, k_rope_1;
-    float2 cos_reg, sin_reg;
-    if (tid < HEAD_DIM / 2) {
-        q_rope = *(half2*)(&q_shmem[tid * 2]);
-        k_rope = *(half2*)(&kv_shmem[tid * 2]);
-        if (tid * 2 < HEAD_DIM / 2) {
-            q_rope_1 = *(half2*)(&q_shmem[HEAD_DIM / 2 + tid * 2]);
-            k_rope_1 = *(half2*)(&kv_shmem[HEAD_DIM / 2 + tid * 2]);
-            cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
-            sin_reg = {-sin[HEAD_DIM / 2 + tid * 2], -sin[HEAD_DIM / 2 + tid * 2 + 1]};
-        } else {
-            q_rope_1 = *(half2*)(&q_shmem[tid * 2 - HEAD_DIM / 2]);
-            k_rope_1 = *(half2*)(&kv_shmem[tid * 2 - HEAD_DIM / 2]);
-            cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
-            sin_reg = {sin[tid * 2 - HEAD_DIM / 2], sin[tid * 2 + 1 - HEAD_DIM / 2]};
-        }
-        *(half2*)(&q_shmem[tid * 2]) = __hadd2(__hmul2(q_rope, __float22half2_rn(cos_reg)), __hmul2(q_rope_1, __float22half2_rn(sin_reg)));
-        *(half2*)(&kv_shmem[tid * 2]) = __hadd2(__hmul2(k_rope, __float22half2_rn(cos_reg)), __hmul2(k_rope_1, __float22half2_rn(sin_reg)));
-    }
-    block.sync();
+    // half2 q_rope, q_rope_1;
+    // half2 k_rope, k_rope_1;
+    // float2 cos_reg, sin_reg;
+    // if (tid < HEAD_DIM / 2) {
+    //     q_rope = *(half2*)(&q_shmem[tid * 2]);
+    //     k_rope = *(half2*)(&kv_shmem[tid * 2]);
+    //     if (tid * 2 < HEAD_DIM / 2) {
+    //         q_rope_1 = *(half2*)(&q_shmem[HEAD_DIM / 2 + tid * 2]);
+    //         k_rope_1 = *(half2*)(&kv_shmem[HEAD_DIM / 2 + tid * 2]);
+    //         cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
+    //         sin_reg = {-sin[HEAD_DIM / 2 + tid * 2], -sin[HEAD_DIM / 2 + tid * 2 + 1]};
+    //     } else {
+    //         q_rope_1 = *(half2*)(&q_shmem[tid * 2 - HEAD_DIM / 2]);
+    //         k_rope_1 = *(half2*)(&kv_shmem[tid * 2 - HEAD_DIM / 2]);
+    //         cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
+    //         sin_reg = {sin[tid * 2 - HEAD_DIM / 2], sin[tid * 2 + 1 - HEAD_DIM / 2]};
+    //     }
+    //     *(half2*)(&q_shmem[tid * 2]) = __hadd2(__hmul2(q_rope, __float22half2_rn(cos_reg)), __hmul2(q_rope_1, __float22half2_rn(sin_reg)));
+    //     *(half2*)(&kv_shmem[tid * 2]) = __hadd2(__hmul2(k_rope, __float22half2_rn(cos_reg)), __hmul2(k_rope_1, __float22half2_rn(sin_reg)));
+    // }
+    // block.sync();
     
     // Q, K reduce (a little misaligned)
     // # ~~~ global_reduction ~~~
@@ -494,87 +494,87 @@ __global__ void single_decode_kernel(
             half2_output_ptr[warp_id * WARP_SIZE + lane_id] = val;
         }
     }
-    grid.sync();
+    // grid.sync();
 
-    // #------------------------------------------------------------------------
-    // # Q @ K^T
-    // #------------------------------------------------------------------------
-    float* global_softmax_reduction = reinterpret_cast<float*>(global_reduce); // FAKE_CLUSTER_NUM*FAKE_CLUSTER_SIZE*2
-    float local_scale = 0.0f; // for softmax
-    // load Q to shared memory
-    if(tid < HEAD_DIM / 2) {
-        *(__half2 * )(&q_shmem[tid * 2]) = *(__half2 * )(&global_q[head_idx * HEAD_DIM + tid * 2]);
-    }
-    // Q @ K^T header
-    load_half_matrix_to_shared_mem(
-        block_shared_half, k_cache, HEAD_DIM, FAKE_TMA_LOAD_ONCE,
-        HIDDEN_DIM, cluster_block_id * KV_DIM_PER_BLOCK, HEAD_DIM * head_idx
-    );
-    asm volatile("cp.async.commit_group;\n" ::);
-    // Q @ K^T loop body
-    for (iter = 0; iter < (KV_DIM_PER_BLOCK / FAKE_TMA_LOAD_ONCE) - 1; ++iter) {
-        asm volatile("cp.async.wait_group %0;\n" ::"n"(0));
-        block.sync();
-        load_half_matrix_to_shared_mem(
-            &block_shared_half[(iter + 1)%2 * FAKE_TMA_LOAD_ONCE * HEAD_DIM], 
-            k_cache, HEAD_DIM, FAKE_TMA_LOAD_ONCE,
-            HIDDEN_DIM, cluster_block_id * KV_DIM_PER_BLOCK + (iter + 1) * FAKE_TMA_LOAD_ONCE, HEAD_DIM * head_idx
-        );
-        asm volatile("cp.async.commit_group;\n" ::);
-        sum = 0.0f;
-        x_Wt_tile(q_shmem, block_shared_half, sum, iter%2, 0, HEAD_DIM, FAKE_TMA_LOAD_ONCE);
-        if(tid < FAKE_TMA_LOAD_ONCE) {
-            float tmp = exp(sum/sqrt(1.0 * HEAD_DIM));
-            local_scale += tmp;
-            attn_weight_shmem[FAKE_TMA_LOAD_ONCE * iter + tid] = __float2half(tmp);
-        }
-    }
-    // Q @ K^T tail
-    asm volatile("cp.async.wait_group %0;\n" ::"n"(0));
-    block.sync();
-    sum = 0.0f;
-    x_Wt_tile(q_shmem, block_shared_half, sum, iter%2, 0, HEAD_DIM, FAKE_TMA_LOAD_ONCE);
-    if(tid < FAKE_TMA_LOAD_ONCE) {
-        float tmp = exp(sum/sqrt(1.0 * HEAD_DIM));
-        local_scale += tmp;
-        attn_weight_shmem[FAKE_TMA_LOAD_ONCE * iter + tid] = __float2half(tmp);
-    };
-    #pragma unroll
-    for (int mask = (WARP_SIZE>>1); mask > 0; mask >>= 1) {
-        local_scale += __shfl_down_sync(0xffffffff, local_scale, mask);
-    }
-    if (lane_id == 0) {
-        block_reduce_float[warp_id] = local_scale;
-    }
-    block.sync(); 
-    if (tid < NUM_WARPS) {
-        local_sum = block_reduce_float[tid];
-    }
-    #pragma unroll
-    for (int mask = (NUM_WARPS>>1); mask > 0; mask >>= 1) {
-        local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
-    }
-    if (tid == 0) {
-        global_softmax_reduction[FAKE_CLUSTER_SIZE * head_idx + cluster_block_id] = local_sum;
-    }
-    grid.sync();
-    if (warp_id == 0) {
-        if (lane_id < FAKE_CLUSTER_SIZE) {
-            local_sum = global_softmax_reduction[FAKE_CLUSTER_SIZE * head_idx + lane_id];
-        }
-        #pragma unroll
-        for (int stride = (FAKE_CLUSTER_SIZE>>1); stride > 0; stride >>= 1) {
-            local_sum += __shfl_down_sync(0xffffffff, local_sum, stride);
-        }
-        if (lane_id == 0){
-            block_reduce_float[0] = local_sum;
-        }
-    } 
-    block.sync();
-    for (int i = tid; i < KV_DIM_PER_BLOCK; i+=BLOCK_SIZE) {
-        attn_weight_shmem[i] = __float2half(__half2float(attn_weight_shmem[i]) / block_reduce_float[0]);
-    }
-    block.sync();
+    // // #------------------------------------------------------------------------
+    // // # Q @ K^T
+    // // #------------------------------------------------------------------------
+    // float* global_softmax_reduction = reinterpret_cast<float*>(global_reduce); // FAKE_CLUSTER_NUM*FAKE_CLUSTER_SIZE*2
+    // float local_scale = 0.0f; // for softmax
+    // // load Q to shared memory
+    // if(tid < HEAD_DIM / 2) {
+    //     *(__half2 * )(&q_shmem[tid * 2]) = *(__half2 * )(&global_q[head_idx * HEAD_DIM + tid * 2]);
+    // }
+    // // Q @ K^T header
+    // load_half_matrix_to_shared_mem(
+    //     block_shared_half, k_cache, HEAD_DIM, FAKE_TMA_LOAD_ONCE,
+    //     HIDDEN_DIM, cluster_block_id * KV_DIM_PER_BLOCK, HEAD_DIM * head_idx
+    // );
+    // asm volatile("cp.async.commit_group;\n" ::);
+    // // Q @ K^T loop body
+    // for (iter = 0; iter < (KV_DIM_PER_BLOCK / FAKE_TMA_LOAD_ONCE) - 1; ++iter) {
+    //     asm volatile("cp.async.wait_group %0;\n" ::"n"(0));
+    //     block.sync();
+    //     load_half_matrix_to_shared_mem(
+    //         &block_shared_half[(iter + 1)%2 * FAKE_TMA_LOAD_ONCE * HEAD_DIM], 
+    //         k_cache, HEAD_DIM, FAKE_TMA_LOAD_ONCE,
+    //         HIDDEN_DIM, cluster_block_id * KV_DIM_PER_BLOCK + (iter + 1) * FAKE_TMA_LOAD_ONCE, HEAD_DIM * head_idx
+    //     );
+    //     asm volatile("cp.async.commit_group;\n" ::);
+    //     sum = 0.0f;
+    //     x_Wt_tile(q_shmem, block_shared_half, sum, iter%2, 0, HEAD_DIM, FAKE_TMA_LOAD_ONCE);
+    //     if(tid < FAKE_TMA_LOAD_ONCE) {
+    //         float tmp = exp(sum/sqrt(1.0 * HEAD_DIM));
+    //         local_scale += tmp;
+    //         attn_weight_shmem[FAKE_TMA_LOAD_ONCE * iter + tid] = __float2half(tmp);
+    //     }
+    // }
+    // // Q @ K^T tail
+    // asm volatile("cp.async.wait_group %0;\n" ::"n"(0));
+    // block.sync();
+    // sum = 0.0f;
+    // x_Wt_tile(q_shmem, block_shared_half, sum, iter%2, 0, HEAD_DIM, FAKE_TMA_LOAD_ONCE);
+    // if(tid < FAKE_TMA_LOAD_ONCE) {
+    //     float tmp = exp(sum/sqrt(1.0 * HEAD_DIM));
+    //     local_scale += tmp;
+    //     attn_weight_shmem[FAKE_TMA_LOAD_ONCE * iter + tid] = __float2half(tmp);
+    // };
+    // #pragma unroll
+    // for (int mask = (WARP_SIZE>>1); mask > 0; mask >>= 1) {
+    //     local_scale += __shfl_down_sync(0xffffffff, local_scale, mask);
+    // }
+    // if (lane_id == 0) {
+    //     block_reduce_float[warp_id] = local_scale;
+    // }
+    // block.sync(); 
+    // if (tid < NUM_WARPS) {
+    //     local_sum = block_reduce_float[tid];
+    // }
+    // #pragma unroll
+    // for (int mask = (NUM_WARPS>>1); mask > 0; mask >>= 1) {
+    //     local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
+    // }
+    // if (tid == 0) {
+    //     global_softmax_reduction[FAKE_CLUSTER_SIZE * head_idx + cluster_block_id] = local_sum;
+    // }
+    // grid.sync();
+    // if (warp_id == 0) {
+    //     if (lane_id < FAKE_CLUSTER_SIZE) {
+    //         local_sum = global_softmax_reduction[FAKE_CLUSTER_SIZE * head_idx + lane_id];
+    //     }
+    //     #pragma unroll
+    //     for (int stride = (FAKE_CLUSTER_SIZE>>1); stride > 0; stride >>= 1) {
+    //         local_sum += __shfl_down_sync(0xffffffff, local_sum, stride);
+    //     }
+    //     if (lane_id == 0){
+    //         block_reduce_float[0] = local_sum;
+    //     }
+    // } 
+    // block.sync();
+    // for (int i = tid; i < KV_DIM_PER_BLOCK; i+=BLOCK_SIZE) {
+    //     attn_weight_shmem[i] = __float2half(__half2float(attn_weight_shmem[i]) / block_reduce_float[0]);
+    // }
+    // block.sync();
 
     // #------------------------------------------------------------------------
     // # W_v x ([(head_num x head_dim) x hidden_dim])
@@ -627,104 +627,104 @@ __global__ void single_decode_kernel(
         }
         half2_output_ptr[warp_id * WARP_SIZE + lane_id] = val;
     }
-    grid.sync();
+    // grid.sync();
 
-    // #------------------------------------------------------------------------
-    // # attn weight @ V
-    // #------------------------------------------------------------------------
-    half* attention_output_shmem = q_shmem; // reuse 
-    sum = 0.0f;
-    load_half_matrix_to_shared_mem(
-        block_shared_half, v_cache, HEAD_DIM, FAKE_TMA_LOAD_ONCE,
-        HIDDEN_DIM, cluster_block_id * KV_DIM_PER_BLOCK, HEAD_DIM * head_idx
-    );
-    asm volatile("cp.async.commit_group;\n" ::);
-    for (iter = 0; iter < (KV_DIM_PER_BLOCK / FAKE_TMA_LOAD_ONCE) - 1; ++iter){
-        asm volatile("cp.async.wait_group %0;\n" ::"n"(0));
-        block.sync();
-        load_half_matrix_to_shared_mem(
-            &block_shared_half[(iter + 1)%2 * FAKE_TMA_LOAD_ONCE * HEAD_DIM], 
-            v_cache, HEAD_DIM, FAKE_TMA_LOAD_ONCE,
-            HIDDEN_DIM, cluster_block_id * KV_DIM_PER_BLOCK + (iter + 1) * FAKE_TMA_LOAD_ONCE, HEAD_DIM * head_idx
-        );
-        asm volatile("cp.async.commit_group;\n" ::);
-        x_W_tile(attn_weight_shmem, block_shared_half, sum, iter%2, iter * FAKE_TMA_LOAD_ONCE, HEAD_DIM, FAKE_TMA_LOAD_ONCE);
-    }
-    asm volatile("cp.async.wait_group %0;\n" ::"n"(0));
-    block.sync();
-    x_W_tile(attn_weight_shmem, block_shared_half, sum, iter%2, iter * FAKE_TMA_LOAD_ONCE, HEAD_DIM, FAKE_TMA_LOAD_ONCE);
-    if (tid < HEAD_DIM) {
-        attention_output_shmem[tid] = __float2half(sum);
-    }
-    block.sync();
-    // # ~~~ global_reduction ~~~
-    // # |  global_attn_output (FAKE_CLUSTER_NUM * HEAD_DIM)  |  global_attn_reduce (FAKE_CLUSTER_NUM*FAKE_CLUSTER_SIZE*HEAD_DIM)  |
-    // # ~~~~~~~~~~~~~~~~~~~~~~~~
-    half* global_attn_output = global_reduce; // FAKE_CLUSTER_NUM * HEAD_DIM
-    half* global_attn_reduce = &(global_reduce[FAKE_CLUSTER_NUM * HEAD_DIM]);
-    if (warp_id < HEAD_DIM/(WARP_SIZE<<1)) {
-        if (warp_id * WARP_SIZE + lane_id < (HEAD_DIM>>1)) {
-            *(half2 *)(&global_attn_reduce[
-                head_idx*FAKE_CLUSTER_SIZE*HEAD_DIM+cluster_block_id*HEAD_DIM+2*(warp_id * WARP_SIZE + lane_id)
-            ]) = *(half2 *)(&attention_output_shmem[2*(warp_id * WARP_SIZE + lane_id)]);
-        }
-    }
-    grid.sync();
-    if (cluster_block_id == 0 && warp_id < HEAD_DIM/(2*WARP_SIZE)) {
-        const __half2* half2_ptr = reinterpret_cast<const __half2*>(&global_attn_reduce[head_idx * FAKE_CLUSTER_SIZE * HEAD_DIM]);
-        __half2* half2_output_ptr = reinterpret_cast<__half2*>(&global_attn_output[head_idx * HEAD_DIM]);
-        __half2 val = half2_ptr[warp_id * WARP_SIZE + lane_id];
-        #pragma unroll
-        for (int ii = 1; ii < FAKE_CLUSTER_SIZE; ++ii) {
-            val = __hadd2(val, half2_ptr[ii * (HEAD_DIM/2) + warp_id * WARP_SIZE + lane_id]); 
-        }
-        half2_output_ptr[warp_id * WARP_SIZE + lane_id] = val;
-    }
-    grid.sync();
+    // // #------------------------------------------------------------------------
+    // // # attn weight @ V
+    // // #------------------------------------------------------------------------
+    // half* attention_output_shmem = q_shmem; // reuse 
+    // sum = 0.0f;
+    // load_half_matrix_to_shared_mem(
+    //     block_shared_half, v_cache, HEAD_DIM, FAKE_TMA_LOAD_ONCE,
+    //     HIDDEN_DIM, cluster_block_id * KV_DIM_PER_BLOCK, HEAD_DIM * head_idx
+    // );
+    // asm volatile("cp.async.commit_group;\n" ::);
+    // for (iter = 0; iter < (KV_DIM_PER_BLOCK / FAKE_TMA_LOAD_ONCE) - 1; ++iter){
+    //     asm volatile("cp.async.wait_group %0;\n" ::"n"(0));
+    //     block.sync();
+    //     load_half_matrix_to_shared_mem(
+    //         &block_shared_half[(iter + 1)%2 * FAKE_TMA_LOAD_ONCE * HEAD_DIM], 
+    //         v_cache, HEAD_DIM, FAKE_TMA_LOAD_ONCE,
+    //         HIDDEN_DIM, cluster_block_id * KV_DIM_PER_BLOCK + (iter + 1) * FAKE_TMA_LOAD_ONCE, HEAD_DIM * head_idx
+    //     );
+    //     asm volatile("cp.async.commit_group;\n" ::);
+    //     x_W_tile(attn_weight_shmem, block_shared_half, sum, iter%2, iter * FAKE_TMA_LOAD_ONCE, HEAD_DIM, FAKE_TMA_LOAD_ONCE);
+    // }
+    // asm volatile("cp.async.wait_group %0;\n" ::"n"(0));
+    // block.sync();
+    // x_W_tile(attn_weight_shmem, block_shared_half, sum, iter%2, iter * FAKE_TMA_LOAD_ONCE, HEAD_DIM, FAKE_TMA_LOAD_ONCE);
+    // if (tid < HEAD_DIM) {
+    //     attention_output_shmem[tid] = __float2half(sum);
+    // }
+    // block.sync();
+    // // # ~~~ global_reduction ~~~
+    // // # |  global_attn_output (FAKE_CLUSTER_NUM * HEAD_DIM)  |  global_attn_reduce (FAKE_CLUSTER_NUM*FAKE_CLUSTER_SIZE*HEAD_DIM)  |
+    // // # ~~~~~~~~~~~~~~~~~~~~~~~~
+    // half* global_attn_output = global_reduce; // FAKE_CLUSTER_NUM * HEAD_DIM
+    // half* global_attn_reduce = &(global_reduce[FAKE_CLUSTER_NUM * HEAD_DIM]);
+    // if (warp_id < HEAD_DIM/(WARP_SIZE<<1)) {
+    //     if (warp_id * WARP_SIZE + lane_id < (HEAD_DIM>>1)) {
+    //         *(half2 *)(&global_attn_reduce[
+    //             head_idx*FAKE_CLUSTER_SIZE*HEAD_DIM+cluster_block_id*HEAD_DIM+2*(warp_id * WARP_SIZE + lane_id)
+    //         ]) = *(half2 *)(&attention_output_shmem[2*(warp_id * WARP_SIZE + lane_id)]);
+    //     }
+    // }
+    // grid.sync();
+    // if (cluster_block_id == 0 && warp_id < HEAD_DIM/(2*WARP_SIZE)) {
+    //     const __half2* half2_ptr = reinterpret_cast<const __half2*>(&global_attn_reduce[head_idx * FAKE_CLUSTER_SIZE * HEAD_DIM]);
+    //     __half2* half2_output_ptr = reinterpret_cast<__half2*>(&global_attn_output[head_idx * HEAD_DIM]);
+    //     __half2 val = half2_ptr[warp_id * WARP_SIZE + lane_id];
+    //     #pragma unroll
+    //     for (int ii = 1; ii < FAKE_CLUSTER_SIZE; ++ii) {
+    //         val = __hadd2(val, half2_ptr[ii * (HEAD_DIM/2) + warp_id * WARP_SIZE + lane_id]); 
+    //     }
+    //     half2_output_ptr[warp_id * WARP_SIZE + lane_id] = val;
+    // }
+    // grid.sync();
 
-    // #------------------------------------------------------------------------
-    // # Attention Projection
-    // #------------------------------------------------------------------------
-    half* attn_proj_output_shmem = &(block_shared_half[FAKE_TMA_LOAD_ONCE * HEAD_DIM * 2]); // EMBEDDING_TILE_LENGTH
-    // load attention output to shared memory
-    if(tid < HEAD_DIM / 2) {
-        *(__half2 * )(&attention_output_shmem[tid * 2]) = *(__half2 * )(&global_attn_output[head_idx * HEAD_DIM + tid * 2]);
-    }
-    load_half_matrix_to_shared_mem(
-        block_shared_half, w_o, HEAD_DIM, FAKE_TMA_LOAD_ONCE,
-        HIDDEN_DIM, cluster_block_id * EMBEDDING_TILE_LENGTH , HEAD_DIM * head_idx
-    );
-    asm volatile("cp.async.commit_group;\n" ::);
-    for (iter = 0; iter < (EMBEDDING_TILE_LENGTH / FAKE_TMA_LOAD_ONCE) - 1; ++iter) {
-        asm volatile("cp.async.wait_group %0;\n" ::"n"(0));
-        block.sync();
-        load_half_matrix_to_shared_mem(
-            &block_shared_half[(iter + 1)%2 * FAKE_TMA_LOAD_ONCE * HEAD_DIM], 
-            w_o, HEAD_DIM, FAKE_TMA_LOAD_ONCE,
-            HIDDEN_DIM, cluster_block_id * EMBEDDING_TILE_LENGTH + (iter + 1) * FAKE_TMA_LOAD_ONCE, HEAD_DIM * head_idx
-        );
-        asm volatile("cp.async.commit_group;\n" ::);
-        sum = 0.0f;
-        x_Wt_tile(attention_output_shmem, block_shared_half, sum, iter%2, 0, HEAD_DIM, FAKE_TMA_LOAD_ONCE);
-        if(tid < FAKE_TMA_LOAD_ONCE) {
-            attn_proj_output_shmem[FAKE_TMA_LOAD_ONCE * iter + tid] = __float2half(sum);
-        }
-    }
-    asm volatile("cp.async.wait_group %0;\n" ::"n"(0));
-    block.sync();
-    sum = 0.0f;
-    x_Wt_tile(attention_output_shmem, block_shared_half, sum, iter%2, 0, HEAD_DIM, FAKE_TMA_LOAD_ONCE);
-    if(tid < FAKE_TMA_LOAD_ONCE) {
-        attn_proj_output_shmem[FAKE_TMA_LOAD_ONCE * iter + tid] = __float2half(sum);
-    }
-    block.sync();
-    // global reduce
-    for(int ii = 0; ii < EMBEDDING_TILE_LENGTH/BLOCK_SIZE/2; ++ii) {
-        *(__half2 * )(&global_reduce[
-            head_idx*HIDDEN_DIM+cluster_block_id*EMBEDDING_TILE_LENGTH+
-            ii*BLOCK_SIZE*2 + tid *2
-        ])=*(__half2 * )(&attn_proj_output_shmem[ii*BLOCK_SIZE*2 + tid * 2]);
-    }
+    // // #------------------------------------------------------------------------
+    // // # Attention Projection
+    // // #------------------------------------------------------------------------
+    // half* attn_proj_output_shmem = &(block_shared_half[FAKE_TMA_LOAD_ONCE * HEAD_DIM * 2]); // EMBEDDING_TILE_LENGTH
+    // // load attention output to shared memory
+    // if(tid < HEAD_DIM / 2) {
+    //     *(__half2 * )(&attention_output_shmem[tid * 2]) = *(__half2 * )(&global_attn_output[head_idx * HEAD_DIM + tid * 2]);
+    // }
+    // load_half_matrix_to_shared_mem(
+    //     block_shared_half, w_o, HEAD_DIM, FAKE_TMA_LOAD_ONCE,
+    //     HIDDEN_DIM, cluster_block_id * EMBEDDING_TILE_LENGTH , HEAD_DIM * head_idx
+    // );
+    // asm volatile("cp.async.commit_group;\n" ::);
+    // for (iter = 0; iter < (EMBEDDING_TILE_LENGTH / FAKE_TMA_LOAD_ONCE) - 1; ++iter) {
+    //     asm volatile("cp.async.wait_group %0;\n" ::"n"(0));
+    //     block.sync();
+    //     load_half_matrix_to_shared_mem(
+    //         &block_shared_half[(iter + 1)%2 * FAKE_TMA_LOAD_ONCE * HEAD_DIM], 
+    //         w_o, HEAD_DIM, FAKE_TMA_LOAD_ONCE,
+    //         HIDDEN_DIM, cluster_block_id * EMBEDDING_TILE_LENGTH + (iter + 1) * FAKE_TMA_LOAD_ONCE, HEAD_DIM * head_idx
+    //     );
+    //     asm volatile("cp.async.commit_group;\n" ::);
+    //     sum = 0.0f;
+    //     x_Wt_tile(attention_output_shmem, block_shared_half, sum, iter%2, 0, HEAD_DIM, FAKE_TMA_LOAD_ONCE);
+    //     if(tid < FAKE_TMA_LOAD_ONCE) {
+    //         attn_proj_output_shmem[FAKE_TMA_LOAD_ONCE * iter + tid] = __float2half(sum);
+    //     }
+    // }
+    // asm volatile("cp.async.wait_group %0;\n" ::"n"(0));
+    // block.sync();
+    // sum = 0.0f;
+    // x_Wt_tile(attention_output_shmem, block_shared_half, sum, iter%2, 0, HEAD_DIM, FAKE_TMA_LOAD_ONCE);
+    // if(tid < FAKE_TMA_LOAD_ONCE) {
+    //     attn_proj_output_shmem[FAKE_TMA_LOAD_ONCE * iter + tid] = __float2half(sum);
+    // }
+    // block.sync();
+    // // global reduce
+    // for(int ii = 0; ii < EMBEDDING_TILE_LENGTH/BLOCK_SIZE/2; ++ii) {
+    //     *(__half2 * )(&global_reduce[
+    //         head_idx*HIDDEN_DIM+cluster_block_id*EMBEDDING_TILE_LENGTH+
+    //         ii*BLOCK_SIZE*2 + tid *2
+    //     ])=*(__half2 * )(&attn_proj_output_shmem[ii*BLOCK_SIZE*2 + tid * 2]);
+    // }
     // grid.sync();
     // if(tid == 0 && head_idx == 0 && cluster_block_id == 0)
     //     printf("%f \n", __half2float(global_reduce[0]));

@@ -80,18 +80,15 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) RMSNormKernel(
         cluster_local_sum = local_sum;
     block.sync();
     // DSM Ring All-reduce
-    for (int i = 1; i < cluster.num_blocks(); i++) {
-        if (tid == 0) {
-            local_sum = cluster_local_sum;
-            int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
-            dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);  
-        }
-        cluster.sync();
-        if (tid == 0) {
-            atomicAdd(dst_shmem, local_sum);
-        }
-        cluster.sync();
+    if (tid == 0) {
+        int dst_cta = (cluster_block_id + 1) % cluster.num_blocks();
+        dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);  
     }
+    cluster.sync();
+    if (tid == 0) {
+        atomicAdd(dst_shmem, local_sum);
+    }
+    cluster.sync();
     rms_rcp = __frsqrt_rn(cluster_local_sum / HIDDEN_DIM + eps);
     for (int d = tid * 8; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 8) { 
         *(uint4*)(&reg_weight[0]) = *(uint4*)(&w_rms_input[cluster_block_st_idx + d]);
@@ -128,7 +125,7 @@ int main(int argc, char** argv) {
     dim3 block(BLOCK_SIZE);
 
     int wmup = 100;
-    int test = 1000;
+    int test = 100;
     for (int i = 0; i < wmup; i++) {
         RMSNormKernel<<<grid, block>>>(
             d_output,

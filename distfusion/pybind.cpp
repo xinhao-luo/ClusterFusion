@@ -30,7 +30,13 @@ torch::Tensor deepseek_decoder_layer(
     torch::Tensor sin
 );
 
+torch::Tensor rmsnorm(
+    torch::Tensor input,
+    torch::Tensor weight
+);
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("llama_decoder_layer", &llama_decoder_layer, "");
     m.def("deepseek_decoder_layer", &deepseek_decoder_layer, "");
+    m.def("rmsnorm", &rmsnorm, "");
 }
