@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import flashinfer
-from tilefusion import deepseek_decoder_layer
+from distfusion import deepseek_decoder_layer
 
 hidden_size = 2048
 num_heads = 16

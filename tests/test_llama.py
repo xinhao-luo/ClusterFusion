@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import flashinfer
-from tilefusion import llama_decoder_layer
+from distfusion import llama_decoder_layer
 
 hidden_size = 4096
 num_heads = 32
