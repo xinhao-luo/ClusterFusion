@@ -8,8 +8,8 @@ namespace cg = cooperative_groups;
 
 // nvcc --generate-code=arch=compute_90a,code=sm_90a -O3 -std=c++17 -lcuda norm.cu -o test && ./test
 
-#define BATCH_SIZE 64
-#define HIDDEN_DIM 8192   
+#define BATCH_SIZE 16
+#define HIDDEN_DIM 8192 
 #define CLUSTER_SIZE 2 // 2 4 8 16
 #define DIM_PER_BLOCK (HIDDEN_DIM / CLUSTER_SIZE)
 #define NUM_PER_THREAD 8

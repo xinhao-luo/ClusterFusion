@@ -256,7 +256,7 @@ int main(int argc, char** argv) {
     dim3 block(BLOCK_SIZE);
 
     int wmup = 100;
-    int test = 1000;
+    int test = 100;
     for (int i = 0; i < wmup; i++) {
         LlamaDecoderLayerKernel<<<grid, block, max_shmem_size>>>(
             d_output,

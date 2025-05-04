@@ -2,10 +2,11 @@ import torch
 import torch.nn as nn
 import flashinfer
 from distfusion import deepseek_decoder_layer
+import time
 
 hidden_size = 2048
 num_heads = 16
-seqlen = 4096
+seqlen = 16384
 nope_head_dim = hidden_size // num_heads
 pe_head_dim = 64
 kv_lora_rank = 512

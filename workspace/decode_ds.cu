@@ -19,7 +19,7 @@ namespace cde = cuda::device::experimental;
 #define KV_LORA_RANK 512    
 #define HEAD_NUM 16     
 #define HIDDEN_DIM 2048 
-#define SEQ_LEN 2048   
+#define SEQ_LEN 16384 
 
 #define NUM_WARPS 4 // 4 8 16 32
 #define WARP_SIZE 32
@@ -1083,7 +1083,7 @@ int main(int argc, char** argv) {
     dim3 block(BLOCK_SIZE);
 
     int wmup = 100;
-    int test = 1000;
+    int test = 100;
     for (int i = 0; i < wmup; i++) {
         single_decode<<<grid, block>>>(
             d_output,

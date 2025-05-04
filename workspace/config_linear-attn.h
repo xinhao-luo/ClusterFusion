@@ -1,11 +1,10 @@
 #include <random>
 
 #define HEAD_DIM 128    
-#define HEAD_NUM 32     
-#define FFN_DIM 12288   
+#define HEAD_NUM 32      
 #define HIDDEN_DIM 4096 
-#define SEQ_LEN 4096
-#define BATCH_SIZE 16
+#define SEQ_LEN 1024
+#define BATCH_SIZE 1
 
 #define NUM_WARPS 4 // 4 8 16 32
 #define WARP_SIZE 32
@@ -18,11 +17,21 @@
 #define DIM_PER_BLOCK (HIDDEN_DIM / CLUSTER_SIZE)
 #define KV_DIM_PER_BLOCK (SEQ_LEN / CLUSTER_SIZE) 
 
+#define BLOCK_M BATCH_SIZE
+#define BLOCK_N HEAD_DIM
+#define BLOCK_K DIM_PER_BLOCK
+#define WARP_M BATCH_SIZE
+#define WARP_N (BLOCK_N / NUM_WARPS)
+#define WARP_K 128 // 16 32 64 128 256
+#define MMA_M 16
+#define MMA_N 16
+#define MMA_K 16 
+
 #define TMA_LOAD_ONCE 64 // 8 16 32 64 128 256
 #define TMA_LOAD_ONCE_NUM (TMA_LOAD_ONCE * HEAD_DIM)
 #define TMA_LOAD_ONCE_SIZE (TMA_LOAD_ONCE_NUM * sizeof(half))
 #define TMA_LOAD_ONCE_ATTN (TMA_LOAD_ONCE / 2)
-#define TMA_LOAD_ONCE_NUM_ATTN ((TMA_LOAD_ONCE * HEAD_DIM) / 2)
+#define TMA_LOAD_ONCE_NUM_ATTN (TMA_LOAD_ONCE_ATTN * HEAD_DIM)
 #define TMA_LOAD_ONCE_SIZE_ATTN (TMA_LOAD_ONCE_NUM_ATTN * sizeof(half))
 
 #define NUM_THREAD_PER_ROW_2 (HEAD_DIM / NUM_PER_THREAD) // 16
