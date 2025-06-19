@@ -1,12 +1,13 @@
 import torch
 import torch.nn as nn
 import flashinfer
-from distfusion import deepseek_decoder_layer
+from clusterfusion import deepseek_decoder_layer
 import time
+import torch.cuda.nvtx as nvtx
 
 hidden_size = 2048
 num_heads = 16
-seqlen = 16384
+seqlen = 4096
 nope_head_dim = hidden_size // num_heads
 pe_head_dim = 64
 kv_lora_rank = 512
@@ -35,18 +36,18 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 def deepseek_decode(hidden, rms_input_weight, rms_ckv_weight, eps, ckv_cache, weight_q, weight_uk, weight_kv, weight_uv, weight_o, cos, sin):
-    residual = torch.zeros(hidden.shape).to(0).half()
-    flashinfer.fused_add_rmsnorm(hidden, residual, rms_input_weight, eps)
+    # residual = torch.zeros(hidden.shape).to(0).half()
+    # flashinfer.fused_add_rmsnorm(hidden, residual, rms_input_weight, eps)
     q = torch.matmul(hidden, weight_q).view(-1, num_heads, nope_head_dim + pe_head_dim)
     q_nope, q_pe = q.split([nope_head_dim, pe_head_dim], dim=-1)
     q_nope = torch.bmm(q_nope.transpose(0, 1), weight_uk).transpose(0, 1)
     latent_cache = torch.matmul(hidden, weight_kv)
     c = latent_cache[..., :kv_lora_rank]
-    residual = torch.zeros(c.shape).to(0).half()
-    flashinfer.fused_add_rmsnorm(c, residual, rms_ckv_weight, eps)
+    # residual = torch.zeros(c.shape).to(0).half()
+    # flashinfer.fused_add_rmsnorm(c, residual, rms_ckv_weight, eps)
     latent_cache[..., :kv_lora_rank] = c
     k_pe = latent_cache[..., kv_lora_rank:]
-    q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin)
+    # q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin)
     latent_cache[..., kv_lora_rank:] = k_pe
     ckv_cache[-1, :] = latent_cache
     ckv_cache = ckv_cache.unsqueeze(1)
@@ -87,22 +88,22 @@ def test_deepseek_decode_e2e():
     # RoPE with cos and sin
     cos, sin = initialize_rope_embeddings(pe_head_dim)
     # Our kernel
-    o = deepseek_decoder_layer(
-        input_tensor,          
-        weight_q_nope,
-        weight_q_pe,
-        weight_uk,
-        weight_kv_nope,
-        weight_k_pe,
-        weight_uv,                          
-        weight_o,              
-        ckv_cache,              
-        rms_input_weight,      
-        rms_ckv_weight,       
-        cos,                   
-        sin                    
-    )
-    print(o.shape, o)
+    # o = deepseek_decoder_layer(
+    #     input_tensor,          
+    #     weight_q_nope,
+    #     weight_q_pe,
+    #     weight_uk,
+    #     weight_kv_nope,
+    #     weight_k_pe,
+    #     weight_uv,                          
+    #     weight_o,              
+    #     ckv_cache,              
+    #     rms_input_weight,      
+    #     rms_ckv_weight,       
+    #     cos,                   
+    #     sin                    
+    # )
+    # print(o.shape, o)
 
     eps = 1e-6
     rms_input_weight = rms_input_weight.reshape((hidden_size,))
@@ -114,18 +115,19 @@ def test_deepseek_decode_e2e():
     weight_uk = weight_uk.reshape(nope_head_dim, num_heads, kv_lora_rank).transpose(0, 1)
     weight_uv = weight_uv.reshape(kv_lora_rank, num_heads, nope_head_dim).transpose(0, 1)
     weight_kv = torch.cat((weight_kv_nope, weight_k_pe), dim=-1)
-
+    nvtx.range_push("ds_decode")
     o_gt = deepseek_decode(input_tensor, rms_input_weight, rms_ckv_weight, eps, ckv_cache, weight_q, weight_uk, weight_kv, weight_uv, weight_o, cos, sin)
+    nvtx.range_pop()
     print(o_gt.shape, o_gt)
 
-    mae = (o - o_gt).abs().mean()
-    print("Mean Absolute Error (MAE):", mae.item())
+    # mae = (o - o_gt).abs().mean()
+    # print("Mean Absolute Error (MAE):", mae.item())
 
-    mse = ((o - o_gt) ** 2).mean()
-    print("Mean Squared Error (MSE):", mse.item())
+    # mse = ((o - o_gt) ** 2).mean()
+    # print("Mean Squared Error (MSE):", mse.item())
 
-    max_error = (o - o_gt).abs().max()
-    print("Max Error:", max_error.item())
+    # max_error = (o - o_gt).abs().max()
+    # print("Max Error:", max_error.item())
 
 if __name__ == "__main__":
     test_deepseek_decode_e2e()

@@ -10,7 +10,7 @@ namespace cde = cuda::device::experimental;
 #include <random>
 #include <stdio.h>
 #include "dsm.cuh"
-// nvcc --generate-code=arch=compute_90a,code=sm_90a -O3 -std=c++17 -lcuda decode_ds.cu -o test && ./test
+// nvcc --generate-code=arch=compute_90a,code=sm_90a -O3 -std=c++17 -lcuda decode_ds.cu -o test && ncu --metrics dram__bytes_read.sum,dram__bytes_write.sum ./test
 
 #define NOPE_HEAD_DIM 128    
 #define ROPE_HEAD_DIM 64    
@@ -19,7 +19,7 @@ namespace cde = cuda::device::experimental;
 #define KV_LORA_RANK 512    
 #define HEAD_NUM 16     
 #define HIDDEN_DIM 2048 
-#define SEQ_LEN 16384 
+#define SEQ_LEN 4096
 
 #define NUM_WARPS 4 // 4 8 16 32
 #define WARP_SIZE 32
@@ -138,51 +138,51 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
     block.sync();
 
     // RMSNorm
-    for (int d = tid * 4; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 4) { 
-        *(uint64_t*)(&reg_input[0]) = *(uint64_t*)(&input_shmem[d]);
-        for (int di = 0; di < 4; di++)
-            local_sum += __half2float(reg_input[di]) * __half2float(reg_input[di]);
-    }
-    #pragma unroll
-    for (int mask = 16; mask > 0; mask >>= 1) {
-        local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
-    }
-    if (lane_id == 0){
-        reduction[warp_id] = local_sum;
-    }
-    block.sync(); 
-    if (tid < NUM_WARPS) 
-        local_sum = reduction[tid];
-    #pragma unroll
-    for (int mask = NUM_WARPS / 2; mask > 0; mask >>= 1) {
-        local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
-    } 
-    block.sync();
-    if (tid == 0)
-        cluster_local_sum = local_sum;
-    cluster.sync();
-    // DSM Ring All-reduce
-    for (int i = 1; i < cluster.num_blocks() - 1; i++) {
-        if (tid == 0) {
-            local_sum = cluster_local_sum;
-            int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
-            dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);  
-        }
-        cluster.sync();
-        if (tid == 0) {
-            atomicAdd(dst_shmem, local_sum);
-        }
-        cluster.sync();
-    }
-    rms_rcp = __frsqrt_rn(cluster_local_sum / HIDDEN_DIM + eps);
-    for (int d = tid * 4; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 4) { 
-        *(uint64_t*)(&reg_weight[0]) = *(uint64_t*)(&w_rms_input[cluster_block_st_idx + d]);
-        for (int i = 0; i < 4; i++) {
-            reg_input[i] = __float2half(__half2float(reg_input[i]) * rms_rcp * __half2float(reg_weight[i]));
-        }
-        *(uint64_t*)(&input_shmem[d]) = *(uint64_t*)(&reg_input[0]);
-    }
-    block.sync();
+    // for (int d = tid * 4; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 4) { 
+    //     *(uint64_t*)(&reg_input[0]) = *(uint64_t*)(&input_shmem[d]);
+    //     for (int di = 0; di < 4; di++)
+    //         local_sum += __half2float(reg_input[di]) * __half2float(reg_input[di]);
+    // }
+    // #pragma unroll
+    // for (int mask = 16; mask > 0; mask >>= 1) {
+    //     local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
+    // }
+    // if (lane_id == 0){
+    //     reduction[warp_id] = local_sum;
+    // }
+    // block.sync(); 
+    // if (tid < NUM_WARPS) 
+    //     local_sum = reduction[tid];
+    // #pragma unroll
+    // for (int mask = NUM_WARPS / 2; mask > 0; mask >>= 1) {
+    //     local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
+    // } 
+    // block.sync();
+    // if (tid == 0)
+    //     cluster_local_sum = local_sum;
+    // cluster.sync();
+    // // DSM Ring All-reduce
+    // for (int i = 1; i < cluster.num_blocks() - 1; i++) {
+    //     if (tid == 0) {
+    //         local_sum = cluster_local_sum;
+    //         int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
+    //         dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);  
+    //     }
+    //     cluster.sync();
+    //     if (tid == 0) {
+    //         atomicAdd(dst_shmem, local_sum);
+    //     }
+    //     cluster.sync();
+    // }
+    // rms_rcp = __frsqrt_rn(cluster_local_sum / HIDDEN_DIM + eps);
+    // for (int d = tid * 4; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 4) { 
+    //     *(uint64_t*)(&reg_weight[0]) = *(uint64_t*)(&w_rms_input[cluster_block_st_idx + d]);
+    //     for (int i = 0; i < 4; i++) {
+    //         reg_input[i] = __float2half(__half2float(reg_input[i]) * rms_rcp * __half2float(reg_weight[i]));
+    //     }
+    //     *(uint64_t*)(&input_shmem[d]) = *(uint64_t*)(&reg_input[0]);
+    // }
+    // block.sync();
 
     // Compute input @ w_q
     // Preload w_q
@@ -356,23 +356,23 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) single_decode(
         neighbor_dst_bar, local_qkv, weight);
 
     // Compute partial RoPE
-    if (tid < ROPE_HEAD_DIM / 2) {
-        q_rope = *(half2*)(&local_qkv[KV_LORA_RANK + tid * 2]);
-        k_rope = *(half2*)(&local_qkv[MLA_HEAD_DIM + KV_LORA_RANK + tid * 2]);
-        if (tid * 2 < ROPE_HEAD_DIM / 2) {
-            q_rope_1 = *(half2*)(&local_qkv[KV_LORA_RANK + ROPE_HEAD_DIM / 2 + tid * 2]);
-            k_rope_1 = *(half2*)(&local_qkv[MLA_HEAD_DIM + ROPE_HEAD_DIM / 2 + tid * 2]);
-            cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
-            sin_reg = {-sin[ROPE_HEAD_DIM / 2 + tid * 2], -sin[ROPE_HEAD_DIM / 2 + tid * 2 + 1]};
-        } else {
-            q_rope_1 = *(half2*)(&local_qkv[KV_LORA_RANK + tid * 2 - ROPE_HEAD_DIM / 2]);
-            k_rope_1 = *(half2*)(&local_qkv[MLA_HEAD_DIM + KV_LORA_RANK + tid * 2 - ROPE_HEAD_DIM / 2]);
-            cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
-            sin_reg = {sin[tid * 2 - ROPE_HEAD_DIM / 2], sin[tid * 2 + 1 - ROPE_HEAD_DIM / 2]};
-        }
-        *(half2*)(&local_qkv[KV_LORA_RANK + tid * 2]) = __hadd2(__hmul2(q_rope, __float22half2_rn(cos_reg)), __hmul2(q_rope_1, __float22half2_rn(sin_reg)));
-        *(half2*)(&local_qkv[MLA_HEAD_DIM + KV_LORA_RANK + tid * 2]) = __hadd2(__hmul2(k_rope, __float22half2_rn(cos_reg)), __hmul2(k_rope_1, __float22half2_rn(sin_reg)));
-    }
+    // if (tid < ROPE_HEAD_DIM / 2) {
+    //     q_rope = *(half2*)(&local_qkv[KV_LORA_RANK + tid * 2]);
+    //     k_rope = *(half2*)(&local_qkv[MLA_HEAD_DIM + KV_LORA_RANK + tid * 2]);
+    //     if (tid * 2 < ROPE_HEAD_DIM / 2) {
+    //         q_rope_1 = *(half2*)(&local_qkv[KV_LORA_RANK + ROPE_HEAD_DIM / 2 + tid * 2]);
+    //         k_rope_1 = *(half2*)(&local_qkv[MLA_HEAD_DIM + ROPE_HEAD_DIM / 2 + tid * 2]);
+    //         cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
+    //         sin_reg = {-sin[ROPE_HEAD_DIM / 2 + tid * 2], -sin[ROPE_HEAD_DIM / 2 + tid * 2 + 1]};
+    //     } else {
+    //         q_rope_1 = *(half2*)(&local_qkv[KV_LORA_RANK + tid * 2 - ROPE_HEAD_DIM / 2]);
+    //         k_rope_1 = *(half2*)(&local_qkv[MLA_HEAD_DIM + KV_LORA_RANK + tid * 2 - ROPE_HEAD_DIM / 2]);
+    //         cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
+    //         sin_reg = {sin[tid * 2 - ROPE_HEAD_DIM / 2], sin[tid * 2 + 1 - ROPE_HEAD_DIM / 2]};
+    //     }
+    //     *(half2*)(&local_qkv[KV_LORA_RANK + tid * 2]) = __hadd2(__hmul2(q_rope, __float22half2_rn(cos_reg)), __hmul2(q_rope_1, __float22half2_rn(sin_reg)));
+    //     *(half2*)(&local_qkv[MLA_HEAD_DIM + KV_LORA_RANK + tid * 2]) = __hadd2(__hmul2(k_rope, __float22half2_rn(cos_reg)), __hmul2(k_rope_1, __float22half2_rn(sin_reg)));
+    // }
 
     // RMSNorm
     local_sum = 0.0;
@@ -1082,8 +1082,8 @@ int main(int argc, char** argv) {
     dim3 grid(HEAD_NUM * CLUSTER_SIZE); 
     dim3 block(BLOCK_SIZE);
 
-    int wmup = 100;
-    int test = 100;
+    int wmup = 0;
+    int test = 1;
     for (int i = 0; i < wmup; i++) {
         single_decode<<<grid, block>>>(
             d_output,

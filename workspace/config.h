@@ -1,7 +1,7 @@
 #include <random>
 
 #define HEAD_DIM 128    
-#define HEAD_NUM 32     
+#define HEAD_NUM 128     
 #define FFN_DIM 12288   
 #define HIDDEN_DIM 4096 
 #define SEQ_LEN 1024
@@ -10,7 +10,7 @@
 #define NUM_WARPS 4 // 4 8 16 32
 #define WARP_SIZE 32
 #define BLOCK_SIZE (NUM_WARPS * WARP_SIZE) 
-#define CLUSTER_SIZE 4 // 2 4
+#define CLUSTER_SIZE 16 // 2 4 8 16
 #define NUM_PER_THREAD 8
 #define NUM_ROW_PER_WARP (HEAD_DIM / NUM_WARPS) 
 #define NUM_THREAD_PER_ROW (WARP_SIZE / NUM_ROW_PER_WARP) 

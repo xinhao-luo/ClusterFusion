@@ -9,7 +9,7 @@ def timeit(fn, *args, **kwargs):
     torch.cuda.synchronize()
 
     # Warmup
-    for _ in range(5):
+    for _ in range(0):
         fn(*args, **kwargs)
     
     # Benchmark using PyTorch Timer
@@ -19,7 +19,7 @@ def timeit(fn, *args, **kwargs):
     )
     
     # Measure execution time
-    measurement = t.timeit(20)  # Runs the function 20 times
+    measurement = t.timeit(1)  # Runs the function 20 times
     avg_time = measurement.mean  # Average time in seconds
 
     return avg_time
@@ -75,15 +75,15 @@ def main():
     torch.manual_seed(42)  
 
     model_configs = [
-        ("Llama-1-7B", 32, 32, 128)             # model_name, nheads_q, nheads_kv, headdim 
+        ("Llama-2-7B", 32, 32, 128)             # model_name, nheads_q, nheads_kv, headdim 
     ]
 
     all_batch_configs = []
 
     all_batch_configs.extend(itertools.product(
         # [1024, 4096, 8192, 16384],  # context_seqlen
-        [1024, 2048, 4096, 8192, 16384],  # context_seqlen
-        [1],  # num_requests  batch_size
+        [16384],  # context_seqlen
+        [16],  # num_requests  batch_size
         [1],  # query_seqlen
     ))
 

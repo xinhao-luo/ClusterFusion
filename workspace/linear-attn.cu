@@ -7,7 +7,7 @@ using barrier = cuda::barrier<cuda::thread_scope_block>;
 namespace cde = cuda::device::experimental;
 namespace cg = cooperative_groups;
 
-// nvcc --generate-code=arch=compute_90a,code=sm_90a -O3 -std=c++17 -lcuda linear-attn.cu -o test && ./test
+// CUDA_VISIBLE_DEVICES=1 nvcc --generate-code=arch=compute_90a,code=sm_90a -O3 -std=c++17 -lcuda linear-attn.cu -o test && ./test
 
 __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     half* output, // 1 * hidden_dim
@@ -466,6 +466,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 }
 
 int main(int argc, char** argv) {   
+    cudaFuncSetAttribute(LlamaDecoderLayerKernel, cudaFuncAttributeNonPortableClusterSizeAllowed, 16);
     // Init input
     half *h_input, *d_input;
     half *h_k_cache, *d_k_cache;

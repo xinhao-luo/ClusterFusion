@@ -60,21 +60,22 @@ def bench_deepseek_mla_decode(batch_size, seq_len, num_heads, backend):
         ckv.dtype,
     )
     o = wrapper.run(q_nope, q_pe, ckv, kpe, return_lse=False)
+    print(o.shape)
 
-    ms = triton.testing.do_bench(
-        lambda: wrapper.run(q_nope, q_pe, ckv, kpe),
-        warmup=100,
-        rep=100,
-    )
+    # ms = triton.testing.do_bench(
+    #     lambda: wrapper.run(q_nope, q_pe, ckv, kpe),
+    #     warmup=100,
+    #     rep=100,
+    # )
 
-    io = sum([_.numel() * _.element_size() for _ in [q_nope, q_pe, ckv, kpe, o]])
+    # io = sum([_.numel() * _.element_size() for _ in [q_nope, q_pe, ckv, kpe, o]])
 
-    print(f"Config: batch_size={batch_size}, seq_len={seq_len}, num_heads={num_heads}")
-    print(f"Latency: {ms * 1e3:.2f} us")
-    print(f"Memory bandwidth: {io * 1e-6 / ms:.2f} GB/s")
-
+    # print(f"Config: batch_size={batch_size}, seq_len={seq_len}, num_heads={num_heads}")
+    # print(f"Latency: {ms * 1e3:.2f} us")
+    # print(f"Memory bandwidth: {io * 1e-6 / ms:.2f} GB/s")
+    # print(o.shape)
 
 if __name__ == "__main__":
-    for seq_len in [1024, 2048, 4096, 8192, 16384]:
-        for batch_size in [1]:
+    for seq_len in [16384]:
+        for batch_size in [16]:
             bench_deepseek_mla_decode(batch_size, seq_len, 16, "fa3")

@@ -12,6 +12,9 @@ namespace cg = cooperative_groups;
 __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     half* output, // 1 * hidden_dim
     half* input,  // 1 * hidden_dim
+    half* global_reduce_qkv,
+    float* global_reduce_softmax,
+    half* global_reduce_attn,
     const __grid_constant__ CUtensorMap tensor_map, // 3 * hidden_dim * hidden_dim
     const __grid_constant__ CUtensorMap tensor_map_k_cache, // seqlen * head_num * head_dim
     const __grid_constant__ CUtensorMap tensor_map_v_cache, // seqlen * head_num * head_dim
@@ -38,17 +41,12 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     // Init registers
     float local_sum = 0.0, tmp = 0.0, local_max = 0.0, pre_max = 0.0, scale = 0.0, softmax_scale = __frsqrt_rn(HEAD_DIM);
     half __align__(16) reg_input[NUM_PER_THREAD], reg_weight[NUM_PER_THREAD], reg_reduce[NUM_PER_THREAD];
-    float* dst_shmem;
-    uint32_t size;
-    uint32_t src_addr, dst_addr, neighbor_dst_bar = 0;
     float __align__(16) qk[DEC_TILE];
 
     // Init barrier
     #pragma nv_diag_suppress static_var_with_dynamic_init
     __shared__ barrier bar[4];
     barrier::arrival_token token[4];
-    __shared__ uint64_t barrier;
-    uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&barrier));
     if (tid == 0) {
         init(&bar[0], blockDim.x);
         cde::fence_proxy_async_shared_cta();
@@ -218,6 +216,20 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     //     src_addr, dst_addr, bar_ptr, 
     //     neighbor_dst_bar, local_qkv, weight);
 
+    for (int qkv = 0; qkv < 3; qkv++) {
+        for (int i = tid; i < HEAD_DIM; i+=BLOCK_SIZE) {
+            atomicAdd(&global_reduce_qkv[qkv * HIDDEN_DIM + head_id * HEAD_DIM + i], local_qkv[qkv * HEAD_DIM + i]);
+        }
+    }
+    cluster.sync();
+
+    for (int qkv = 0; qkv < 3; qkv++) {
+        for (int i = tid; i < HEAD_DIM; i+=BLOCK_SIZE) {
+            local_qkv[qkv * HEAD_DIM + i] = global_reduce_qkv[qkv * HIDDEN_DIM + head_id * HEAD_DIM + i];
+        }
+    }
+    block.sync();
+
     // Compute flash-decoding
     local_sum = 0.0f;
     for(int i = 0; i < NUM_PER_THREAD; i++)
@@ -359,20 +371,30 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     if(tid == 0) {
         cluster_local_max = local_max;
     }
-    cluster.sync();
-    // DSM Ring All-reduce
-    for (int i = 1; i < cluster.num_blocks() - 1; i++) {
-        if (tid == 0) {
-            local_max = cluster_local_max;
-            int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
-            dst_shmem = cluster.map_shared_rank(&cluster_local_max, dst_cta);  
-        }
-        cluster.sync();
-        if (tid == 0) {
-            *dst_shmem = fmaxf(*dst_shmem, local_max);
-        }
-        cluster.sync();
+    block.sync();
+    // cluster.sync();
+    // // DSM Ring All-reduce
+    // for (int i = 1; i < cluster.num_blocks() - 1; i++) {
+    //     if (tid == 0) {
+    //         local_max = cluster_local_max;
+    //         int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
+    //         dst_shmem = cluster.map_shared_rank(&cluster_local_max, dst_cta);  
+    //     }
+    //     cluster.sync();
+    //     if (tid == 0) {
+    //         *dst_shmem = fmaxf(*dst_shmem, local_max);
+    //     }
+    //     cluster.sync();
+    // }
+    if(tid == 0) {
+        global_reduce_softmax[head_id * 2 + 0] = fmaxf(global_reduce_softmax[head_id * 2 + 0], cluster_local_max);
     }
+    cluster.sync();
+
+    if(tid == 0) {
+        cluster_local_max = global_reduce_softmax[head_id * 2 + 0];
+    }
+    block.sync();
     scale = __expf(pre_max - cluster_local_max);
     local_sum *= scale;
     #pragma unroll
@@ -382,20 +404,30 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     if(tid == 0) {
         cluster_local_sum = local_sum;
     }
-    cluster.sync();
-    // DSM Ring-All reduce
-    for (int i = 1; i < cluster.num_blocks() - 1; i++) {
-        if (tid == 0) {
-            local_sum = cluster_local_sum;
-            int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
-            dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);  
-        }
-        cluster.sync();
-        if (tid == 0) {
-            atomicAdd(dst_shmem, local_sum);
-        }
-        cluster.sync();
+    block.sync();
+    // cluster.sync();
+    // // DSM Ring-All reduce
+    // for (int i = 1; i < cluster.num_blocks() - 1; i++) {
+    //     if (tid == 0) {
+    //         local_sum = cluster_local_sum;
+    //         int dst_cta = (cluster_block_id + i) % cluster.num_blocks();
+    //         dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);  
+    //     }
+    //     cluster.sync();
+    //     if (tid == 0) {
+    //         atomicAdd(dst_shmem, local_sum);
+    //     }
+    //     cluster.sync();
+    // }
+    if(tid == 0) {
+        atomicAdd(&global_reduce_softmax[head_id * 2 + 1], cluster_local_sum);
     }
+    cluster.sync();
+
+    if(tid == 0) {
+        cluster_local_sum = global_reduce_softmax[head_id * 2 + 1];
+    }
+    block.sync();
     #pragma unroll
     for (int j = 0; j < NUM_PER_THREAD; j++) {
         reg_reduce[j] = __hmul(reg_reduce[j], __float2half(__frcp_rn(cluster_local_sum)));
@@ -406,13 +438,23 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     block.sync();
 
     // DSM Ring-All reduce
-    size = HEAD_DIM * sizeof(half);
-    src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(&local_qkv[HEAD_DIM + HEAD_DIM]));
-    dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(weight));
-    dsm_ring_allreduce<CLUSTER_SIZE, Stage::ATTN>(
-        size, tid, HEAD_DIM, cluster_block_id,  
-        src_addr, dst_addr, bar_ptr, 
-        neighbor_dst_bar, &local_qkv[HEAD_DIM + HEAD_DIM], weight);
+    // size = HEAD_DIM * sizeof(half);
+    // src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(&local_qkv[HEAD_DIM + HEAD_DIM]));
+    // dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(weight));
+    // dsm_ring_allreduce<CLUSTER_SIZE, Stage::ATTN>(
+    //     size, tid, HEAD_DIM, cluster_block_id,  
+    //     src_addr, dst_addr, bar_ptr, 
+    //     neighbor_dst_bar, &local_qkv[HEAD_DIM + HEAD_DIM], weight);
+
+    for (int i = tid; i < HEAD_DIM; i+=BLOCK_SIZE) {
+        atomicAdd(&global_reduce_attn[head_id * HEAD_DIM + i], local_qkv[2 * HEAD_DIM + i]);
+    }
+    cluster.sync();
+
+    for (int i = tid; i < HEAD_DIM; i+=BLOCK_SIZE) {
+        local_qkv[2 * HEAD_DIM + i] = global_reduce_attn[head_id * HEAD_DIM + i];
+    }
+    block.sync();
 
     // Compute output @ w_o
     // Preload w_o
@@ -500,6 +542,15 @@ int main(int argc, char** argv) {
     h_output = new half[BATCH_SIZE * HIDDEN_DIM];
     cudaMalloc(reinterpret_cast<void**>(&d_output), sizeof(half) * BATCH_SIZE * HIDDEN_DIM);
     
+    half *global_reduce_qkv;
+    cudaMalloc(reinterpret_cast<void**>(&global_reduce_qkv), sizeof(half) * 3 * HIDDEN_DIM);
+
+    half *global_reduce_attn;
+    cudaMalloc(reinterpret_cast<void**>(&global_reduce_attn), sizeof(half) * HIDDEN_DIM);
+
+    float *global_reduce_softmax;
+    cudaMalloc(reinterpret_cast<void**>(&global_reduce_softmax), sizeof(float) * HEAD_NUM * 2);
+
     CUtensorMap tensor_map_weight{};
     CUtensorMap tensor_map_k_cache{};
     CUtensorMap tensor_map_v_cache{};
@@ -595,6 +646,9 @@ int main(int argc, char** argv) {
         LlamaDecoderLayerKernel<<<grid, block>>>(
             d_output,
             d_input,
+            global_reduce_qkv,
+            global_reduce_softmax,
+            global_reduce_attn,
             tensor_map_weight,
             tensor_map_k_cache,
             tensor_map_v_cache,
@@ -615,6 +669,9 @@ int main(int argc, char** argv) {
         LlamaDecoderLayerKernel<<<grid, block>>>(
             d_output,
             d_input,
+            global_reduce_qkv,
+            global_reduce_softmax,
+            global_reduce_attn,
             tensor_map_weight,
             tensor_map_k_cache,
             tensor_map_v_cache,

@@ -1,7 +1,7 @@
 #include <random>
 
-#define HEAD_DIM 128    
-#define HEAD_NUM 32      
+#define HEAD_DIM 128   
+#define HEAD_NUM 32     
 #define HIDDEN_DIM 4096 
 #define SEQ_LEN 1024
 #define BATCH_SIZE 1

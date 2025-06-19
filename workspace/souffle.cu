@@ -429,29 +429,6 @@ __global__ void single_decode_kernel(
         kv_shmem[tid] = __float2half(sum);
     }
     block.sync();
-
-    // rope
-    half2 q_rope, q_rope_1;
-    half2 k_rope, k_rope_1;
-    float2 cos_reg, sin_reg;
-    if (tid < HEAD_DIM / 2) {
-        q_rope = *(half2*)(&q_shmem[tid * 2]);
-        k_rope = *(half2*)(&kv_shmem[tid * 2]);
-        if (tid * 2 < HEAD_DIM / 2) {
-            q_rope_1 = *(half2*)(&q_shmem[HEAD_DIM / 2 + tid * 2]);
-            k_rope_1 = *(half2*)(&kv_shmem[HEAD_DIM / 2 + tid * 2]);
-            cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
-            sin_reg = {-sin[HEAD_DIM / 2 + tid * 2], -sin[HEAD_DIM / 2 + tid * 2 + 1]};
-        } else {
-            q_rope_1 = *(half2*)(&q_shmem[tid * 2 - HEAD_DIM / 2]);
-            k_rope_1 = *(half2*)(&kv_shmem[tid * 2 - HEAD_DIM / 2]);
-            cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
-            sin_reg = {sin[tid * 2 - HEAD_DIM / 2], sin[tid * 2 + 1 - HEAD_DIM / 2]};
-        }
-        *(half2*)(&q_shmem[tid * 2]) = __hadd2(__hmul2(q_rope, __float22half2_rn(cos_reg)), __hmul2(q_rope_1, __float22half2_rn(sin_reg)));
-        *(half2*)(&kv_shmem[tid * 2]) = __hadd2(__hmul2(k_rope, __float22half2_rn(cos_reg)), __hmul2(k_rope_1, __float22half2_rn(sin_reg)));
-    }
-    block.sync();
     
     // Q, K reduce (a little misaligned)
     // # ~~~ global_reduction ~~~
@@ -839,15 +816,15 @@ int main(int argc, char **argv) {
         &d_ffn_gate_up, &d_ffn_down
     };
     cudaDeviceSynchronize();
-    cudaLaunchCooperativeKernel((void *) single_decode_kernel, grid, block, kernelArgs);
+    // cudaLaunchCooperativeKernel((void *) single_decode_kernel, grid, block, kernelArgs);
     cudaDeviceSynchronize();
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         std::cerr << "Kernel execution failed: " << cudaGetErrorString(err) << "\n";
     }
 
-    int wmup = 100;
-    int test = 100;
+    int wmup = 1;
+    int test = 0;
     for (int i = 0; i < wmup; i++) {
         cudaLaunchCooperativeKernel((void *) single_decode_kernel, grid, block, kernelArgs);
     }
