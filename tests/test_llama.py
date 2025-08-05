@@ -101,6 +101,32 @@ def test_llama_decode_e2e():
     )
     print(o.shape, o)
 
+    same = True
+    for i in range(5):
+        tmp = llama_decoder_layer(
+                input_tensor,          
+                weight_qkv,                          
+                weight_o,              
+                kv_cache_full[0],
+                kv_cache_full[1],           
+                gate_up_proj_weight_fuse,      
+                down_proj_weight_fuse,      
+                rms_input_weight,      
+                rms_attn_weight,       
+                cos,                   
+                sin                    
+            )
+        if not torch.equal(tmp, o):
+            same = False
+            print(tmp)
+
+    if same:
+        print("Kernel outputs match.")
+    else:
+        print("Kernel outputs differ.")
+        max_error = (tmp - o).abs().max()
+        print(f"Max error between outputs: {max_error.item()}") 
+
     eps = 1e-6
     rms_input_weight = rms_input_weight.reshape((hidden_size,))
     rms_attn_weight = rms_attn_weight.reshape((hidden_size,))
@@ -137,28 +163,6 @@ def test_llama_decode_e2e():
     max_error = (o - o_gt).abs().max()
     print("Max Error:", max_error.item())
 
-    same = True
-    for i in range(5):
-        tmp = llama_decoder_layer(
-                input_tensor,          
-                weight_qkv,                          
-                weight_o,              
-                kv_cache_full[0],
-                kv_cache_full[1],           
-                gate_up_proj_weight_fuse,      
-                down_proj_weight_fuse,      
-                rms_input_weight,      
-                rms_attn_weight,       
-                cos,                   
-                sin                    
-            )
-        if not torch.equal(tmp, o):
-            same = False
-
-    if same:
-        print("Kernel outputs match.")
-    else:
-        print("Kernel outputs differ.")
 
 if __name__ == "__main__":
     test_llama_decode_e2e()
