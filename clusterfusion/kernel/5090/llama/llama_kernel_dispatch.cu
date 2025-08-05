@@ -1,7 +1,7 @@
 #include "kernel.cuh"
 #include <torch/extension.h>
 
-torch::Tensor llama_decoder_layer(
+torch::Tensor llama_decoder_layer_sm120(
     torch::Tensor input,
     torch::Tensor weight_qkv,
     torch::Tensor weight_o,

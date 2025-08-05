@@ -683,6 +683,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) DeepSeekDecoderLayerKernel(
         if (lane_id % NUM_THREAD_PER_ROW_2 == 0) {
             atomicAdd(&output[cluster_block_st_idx + weight_idx_2 + (id - 1) * TMA_LOAD_ONCE], __float2half(tmp));
         }
+        block.sync();
     }
     bar[1].wait(std::move(token[1]));
     tmp = 0.0;
