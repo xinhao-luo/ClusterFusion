@@ -36,9 +36,9 @@ def rotate_half(x):
 
 def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, cos, sin):
     residual = torch.zeros(hidden.shape).to(0).half()
-    flashinfer.fused_add_rmsnorm(hidden, residual, rms_input_weight, eps)
+    flashinfer.fused_add_rmsnorm(hidden, residual, rms_input_weight, eps) # RMSNorm
     residual = hidden
-    qkv_new = qkv_proj(hidden).view(3, 32, head_dim)
+    qkv_new = qkv_proj(hidden).view(3, 32, head_dim) # QKV
     q = qkv_new[0].view(1, 32, head_dim)
     k_new = qkv_new[1].view(1, 32, head_dim)
     v_new = qkv_new[2].view(1, 32, head_dim)
