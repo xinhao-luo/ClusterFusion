@@ -49,9 +49,15 @@ torch::Tensor llama_decoder_layer_sm120(
     torch::Tensor sin
 );
 
+#ifdef COMPILE_SM90
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("llama_decoder_layer", &llama_decoder_layer, "");
     m.def("deepseek_decoder_layer", &deepseek_decoder_layer, "");
     m.def("rmsnorm", &rmsnorm, "");
-    m.def("llama_decoder_layer_sm120", &llama_decoder_layer_sm120, "");
 }
+#endif
+#ifdef COMPILE_SM120
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("llama_decoder_layer", &llama_decoder_layer_sm120, "");
+}
+#endif

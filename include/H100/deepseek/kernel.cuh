@@ -78,16 +78,9 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) DeepSeekDecoderLayerKernel(
     uint cluster_block_st_idx = cluster_block_id * DIM_PER_BLOCK;
     uint cluster_block_st_uv_idx = cluster_block_id * (KV_LORA_RANK / CLUSTER_SIZE);
 
-    // Load input to shared memory
-    #pragma unroll
-    for (int i = tid * 8; i < DIM_PER_BLOCK; i+=BLOCK_SIZE * 8) {
-        *(uint4*)(&input_shmem[i]) = *(uint4*)(&input[cluster_block_st_idx + i]);
-    }
-    block.sync();
-
     // RMSNorm
     for (int d = tid * 4; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 4) { 
-        *(uint64_t*)(&reg_input[0]) = *(uint64_t*)(&input_shmem[d]);
+        *(uint64_t*)(&reg_input[0]) = *(uint64_t*)(&input[cluster_block_st_idx + d]);
         for (int di = 0; di < 4; di++)
             local_sum += __half2float(reg_input[di]) * __half2float(reg_input[di]);
     }

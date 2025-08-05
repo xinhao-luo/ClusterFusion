@@ -83,7 +83,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 
     // RMSNorm
     for (int d = tid * 8; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 8) { 
-        *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[cluster_block_st_id + d]);
+        *(uint4*)(&reg_input[0]) = *(uint4*)(&input[cluster_block_st_id + d]);
         for (int di = 0; di < 8; di++)
             local_sum += __half2float(reg_input[di]) * __half2float(reg_input[di]);
     }
@@ -265,23 +265,23 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         neighbor_dst_bar, local_qkv, weight);
 
     // Compute RoPE
-    if (tid < HEAD_DIM / 2) {
-        q_rope = *(half2*)(&local_qkv[tid * 2]);
-        k_rope = *(half2*)(&local_qkv[HEAD_DIM + tid * 2]);
-        if (tid * 2 < HEAD_DIM / 2) {
-            q_rope_1 = *(half2*)(&local_qkv[HEAD_DIM / 2 + tid * 2]);
-            k_rope_1 = *(half2*)(&local_qkv[HEAD_DIM + HEAD_DIM / 2 + tid * 2]);
-            cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
-            sin_reg = {-sin[HEAD_DIM / 2 + tid * 2], -sin[HEAD_DIM / 2 + tid * 2 + 1]};
-        } else {
-            q_rope_1 = *(half2*)(&local_qkv[tid * 2 - HEAD_DIM / 2]);
-            k_rope_1 = *(half2*)(&local_qkv[HEAD_DIM + tid * 2 - HEAD_DIM / 2]);
-            cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
-            sin_reg = {sin[tid * 2 - HEAD_DIM / 2], sin[tid * 2 + 1 - HEAD_DIM / 2]};
-        }
-        *(half2*)(&local_qkv[tid * 2]) = __hadd2(__hmul2(q_rope, __float22half2_rn(cos_reg)), __hmul2(q_rope_1, __float22half2_rn(sin_reg)));
-        *(half2*)(&local_qkv[HEAD_DIM + tid * 2]) = __hadd2(__hmul2(k_rope, __float22half2_rn(cos_reg)), __hmul2(k_rope_1, __float22half2_rn(sin_reg)));
-    }
+    // if (tid < HEAD_DIM / 2) {
+    //     q_rope = *(half2*)(&local_qkv[tid * 2]);
+    //     k_rope = *(half2*)(&local_qkv[HEAD_DIM + tid * 2]);
+    //     if (tid * 2 < HEAD_DIM / 2) {
+    //         q_rope_1 = *(half2*)(&local_qkv[HEAD_DIM / 2 + tid * 2]);
+    //         k_rope_1 = *(half2*)(&local_qkv[HEAD_DIM + HEAD_DIM / 2 + tid * 2]);
+    //         cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
+    //         sin_reg = {-sin[HEAD_DIM / 2 + tid * 2], -sin[HEAD_DIM / 2 + tid * 2 + 1]};
+    //     } else {
+    //         q_rope_1 = *(half2*)(&local_qkv[tid * 2 - HEAD_DIM / 2]);
+    //         k_rope_1 = *(half2*)(&local_qkv[HEAD_DIM + tid * 2 - HEAD_DIM / 2]);
+    //         cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
+    //         sin_reg = {sin[tid * 2 - HEAD_DIM / 2], sin[tid * 2 + 1 - HEAD_DIM / 2]};
+    //     }
+    //     *(half2*)(&local_qkv[tid * 2]) = __hadd2(__hmul2(q_rope, __float22half2_rn(cos_reg)), __hmul2(q_rope_1, __float22half2_rn(sin_reg)));
+    //     *(half2*)(&local_qkv[HEAD_DIM + tid * 2]) = __hadd2(__hmul2(k_rope, __float22half2_rn(cos_reg)), __hmul2(k_rope_1, __float22half2_rn(sin_reg)));
+    // }
 
     // Compute flash-decoding
     local_sum = 0.0f;

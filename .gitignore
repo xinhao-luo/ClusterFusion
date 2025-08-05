@@ -1,5 +1,5 @@
-*.log
-clusterfusion/build/
-clusterfusion/clusterfusion.egg-info/
+build/
+clusterfusion.egg-info/
 dist/
-**.DS_Store
+*.DS_Store
+__pycache__/
