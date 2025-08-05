@@ -42,7 +42,7 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
     q = qkv_new[0].view(1, 32, head_dim)
     k_new = qkv_new[1].view(1, 32, head_dim)
     v_new = qkv_new[2].view(1, 32, head_dim)
-    # q, k_new = apply_rotary_pos_emb(q, k_new, cos, sin)
+    # q, k_new = apply_rotary_pos_emb(q, k_new, cos, sin)  # RoPE need debug
     q = q.reshape(32, head_dim)
     k = torch.cat((kv_cache[0], k_new), dim=0) 
     v = torch.cat((kv_cache[1], v_new), dim=0)

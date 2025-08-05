@@ -270,6 +270,10 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, local_qkv, weight);
 
+    /*
+      TODO: RoPE need debug  
+    */ 
+
     // Compute RoPE
     // if (tid < HEAD_DIM / 2) {
     //     q_rope = *(half2*)(&local_qkv[tid * 2]);
