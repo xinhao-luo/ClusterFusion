@@ -35,15 +35,15 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     const uint32_t tile_col = tid % NUM_THREAD_PER_ROW_2;
 
     // Init shared memory
-    __shared__ __align__(16) half input_shmem[DIM_PER_BLOCK];
-    __shared__ float reduction[2 * NUM_PER_ROW_2];
-    __shared__ alignas(128) half weight[2 * TMA_LOAD_ONCE * MAX_SMEM_DIM];
-    __shared__ __align__(16) half local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM + HEAD_DIM];
-    // extern __shared__ uint8_t shmem_base[];
-    // half* input_shmem = reinterpret_cast<half*>(shmem_base);
-    // float* reduction  = reinterpret_cast<float*>(shmem_base + DIM_PER_BLOCK * sizeof(half));
-    // half* weight      = reinterpret_cast<half*>((uintptr_t)(shmem_base + DIM_PER_BLOCK * sizeof(half) + 2 * NUM_PER_ROW_2 * sizeof(float)) + 127 & ~127);
-    // half* local_qkv   = reinterpret_cast<half*>((uintptr_t)(weight + 2 * TMA_LOAD_ONCE * MAX_SMEM_DIM) + 127 & ~127);
+    // __shared__ __align__(16) half input_shmem[DIM_PER_BLOCK];
+    // __shared__ float reduction[2 * DIM_BLOCK_REDUCE];
+    // __shared__ alignas(128) half weight[2 * TMA_LOAD_ONCE * MAX_SMEM_DIM];
+    // __shared__ __align__(16) half local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM + HEAD_DIM];
+    extern __shared__ uint8_t shmem_base[];
+    half* input_shmem = reinterpret_cast<half*>(shmem_base);
+    float* reduction  = reinterpret_cast<float*>(shmem_base + DIM_PER_BLOCK * sizeof(half));
+    half* weight      = reinterpret_cast<half*>((uintptr_t)(shmem_base + DIM_PER_BLOCK * sizeof(half) + 2 * DIM_BLOCK_REDUCE * sizeof(float)) + 127 & ~127);
+    half* local_qkv   = reinterpret_cast<half*>((uintptr_t)(weight + 2 * TMA_LOAD_ONCE * MAX_SMEM_DIM) + 127 & ~127);
 
     __shared__ float cluster_local_sum, cluster_local_max;
 
@@ -415,7 +415,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         reg_reduce[i] = __float2half(0.0f);
     local_sum = 0.0, local_max = 0.0;
     #pragma unroll
-    for(int j = 0; j < NUM_PER_ROW_2; j++) {
+    for(int j = 0; j < DIM_BLOCK_REDUCE; j++) {
         *(uint4*)(&reg_input[0]) = *(uint4*)(&weight[j * HEAD_DIM + tile_col * NUM_PER_THREAD]);
         float m = reduction[j * 2], s = reduction[j * 2 + 1];
         pre_max = local_max;
@@ -435,7 +435,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         cluster_local_max = local_max;
     }
     cluster.sync();
-    // DSM Ring All-reduce
+    // DSM Ring All-reduce: local_max
     for (int i = 1; i < cluster.num_blocks() - 1; i++) {
         if (tid == 0) {
             local_max = cluster_local_max;
@@ -458,7 +458,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         cluster_local_sum = local_sum;
     }
     cluster.sync();
-    // DSM Ring-All reduce
+    // DSM Ring-All reduce: local_sum
     for (int i = 1; i < cluster.num_blocks() - 1; i++) {
         if (tid == 0) {
             local_sum = cluster_local_sum;

@@ -16,7 +16,7 @@ torch::Tensor llama_decoder_layer_sm120(
 ) 
 {
     cudaFuncSetAttribute(LlamaDecoderLayerKernel, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
-    uint32_t max_shmem_size = ((((DIM_PER_BLOCK * sizeof(half) + 2 * NUM_PER_ROW_2 * sizeof(float) + 127) & ~127) +  2 * TMA_LOAD_ONCE * MAX_SMEM_DIM * sizeof(half) + 127) & ~127) + (MAX_SMEM_DIM + MAX_SMEM_DIM + HEAD_DIM) * sizeof(half);
+    uint32_t max_shmem_size = ((((DIM_PER_BLOCK * sizeof(half) + 2 * DIM_BLOCK_REDUCE * sizeof(float) + 127) & ~127) +  2 * TMA_LOAD_ONCE * MAX_SMEM_DIM * sizeof(half) + 127) & ~127) + (MAX_SMEM_DIM + MAX_SMEM_DIM + HEAD_DIM) * sizeof(half);
     cudaFuncSetAttribute(LlamaDecoderLayerKernel, cudaFuncAttributeMaxDynamicSharedMemorySize, max_shmem_size);
     auto options = torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA, 0);
     torch::Tensor o = torch::full({1, HIDDEN_DIM}, 0, options);
