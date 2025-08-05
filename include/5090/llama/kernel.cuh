@@ -519,7 +519,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
             tmp += __shfl_down_sync(0xffffffff, tmp, mask);
         }
         if (lane_id % NUM_THREAD_PER_ROW_3 == 0) {
-            atomicAdd(&output[cluster_block_st_id + weight_idx_3 + (id - 1) * TMA_LOAD_ONCE], __float2half(tmp));
+            // atomicAdd(&output[cluster_block_st_id + weight_idx_3 + (id - 1) * TMA_LOAD_ONCE], __float2half(tmp));
+            global_reduce[(head_id * CLUSTER_SIZE + cluster_block_id) * HIDDEN_DIM + weight_idx_3 + cluster_block_st_id + (id - 1) * TMA_LOAD_ONCE] = __float2half(tmp);
         }
         block.sync();
     }
@@ -537,7 +538,15 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         tmp += __shfl_down_sync(0xffffffff, tmp, mask);
     }
     if (lane_id % NUM_THREAD_PER_ROW_3 == 0) {
-        atomicAdd(&output[cluster_block_st_id + weight_idx_3 + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE], __float2half(tmp));
+        // atomicAdd(&output[cluster_block_st_id + weight_idx_3 + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE], __float2half(tmp));
+        global_reduce[(head_id * CLUSTER_SIZE + cluster_block_id) * HIDDEN_DIM + cluster_block_st_id + weight_idx_3 + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE] = __float2half(tmp);
+    }
+    if (head_id == 0) {
+        for (int i = 0; i < HEAD_NUM * CLUSTER_SIZE; i++) {
+            for (int j = 0; j < DIM_PER_BLOCK / BLOCK_SIZE; j++) {
+                output[cluster_block_st_id + tid * DIM_PER_BLOCK / BLOCK_SIZE + j] = __hadd(output[cluster_block_st_id + tid * DIM_PER_BLOCK / BLOCK_SIZE + j], global_reduce[i * HIDDEN_DIM + cluster_block_st_id + tid * DIM_PER_BLOCK / BLOCK_SIZE + j]);
+            }
+        }
     }
     // cluster.sync();
 

@@ -22,7 +22,8 @@ torch::Tensor llama_decoder_layer_sm120(
     torch::Tensor o = torch::full({1, HIDDEN_DIM}, 0, options);
     half* o_ptr = reinterpret_cast<half*>(o.data_ptr<at::Half>());
     half *reduce_workspace;
-    cudaMalloc(reinterpret_cast<void**>(&reduce_workspace), sizeof(half) * 1 * HIDDEN_DIM);
+    // Check atomicAdd
+    cudaMalloc(reinterpret_cast<void**>(&reduce_workspace), sizeof(half) * HEAD_NUM * CLUSTER_SIZE * HIDDEN_DIM);
 
     half* input_ptr = reinterpret_cast<half*>(input.data_ptr<at::Half>());
     half* weight_qkv_ptr = reinterpret_cast<half*>(weight_qkv.data_ptr<at::Half>());
