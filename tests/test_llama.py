@@ -153,7 +153,7 @@ def test_llama_decode_e2e():
                 sin                    
             )
         if not torch.equal(tmp, o):
-            are_same = False
+            same = False
 
     if same:
         print("Kernel outputs match.")
