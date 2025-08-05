@@ -1,0 +1,4 @@
+*.log
+clusterfusion/build/
+clusterfusion/clusterfusion.egg-info/
+dist/

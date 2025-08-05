@@ -1,6 +1,6 @@
-# ClusterFusion
+# ClusterFusion: Expanding Operator Fusion Scope for LLM Inference via Cluster-Level Collective Primitive
 
-<!-- This repository contains the official implementation of **ClusterFusion: Expanding Operator Fusion Scope for LLM Inference via Cluster-Level Collective Primitive**. -->
+This repository contains the official implementation of **ClusterFusion: Expanding Operator Fusion Scope for LLM Inference via Cluster-Level Collective Primitive**.
 
 ## Requirements
 

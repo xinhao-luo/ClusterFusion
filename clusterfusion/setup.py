@@ -5,12 +5,13 @@ extra_compile_args = {
     "nvcc": [
         "-O3",
         "-std=c++17",
-        "-arch=compute_90a",
-        "-code=sm_90a",
+        "-arch=compute_120a",
+        "-code=sm_120a",
         "-lcuda",
     ],
 }
 
+# TODO: rename kernel to support both H100 and 5090
 setup(
     name="clusterfusion",
     packages=find_packages(),
@@ -19,9 +20,9 @@ setup(
             name="clusterfusion",
             sources=[
                 "pybind.cpp",
-                "kernel/llama/llama_kernel_dispatch.cu",
-                "kernel/deepseek/deepseek_kernel_dispatch.cu",
-                "kernel/Norm/norm_kernel_dispatch.cu",
+                "kernel/5090/llama/llama_kernel_dispatch.cu",
+                "kernel/H100/deepseek/deepseek_kernel_dispatch.cu",
+                "kernel/H100/norm/norm_kernel_dispatch.cu",
             ],
             extra_compile_args=extra_compile_args,
             libraries=["cuda", "cudart"],

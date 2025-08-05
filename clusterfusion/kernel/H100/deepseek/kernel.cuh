@@ -1,6 +1,6 @@
 #include <cuda/barrier>
 #include <cudaTypedefs.h>
-#include "../dsm.cuh"
+#include "../../dsm.cuh"
 #include "config.h"
 using barrier = cuda::barrier<cuda::thread_scope_block>;
 namespace cde = cuda::device::experimental;

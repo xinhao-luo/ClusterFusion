@@ -15,6 +15,8 @@ mla_head_dim = kv_lora_rank + pe_head_dim
 page_size = 1
 bsz = 1
 
+torch.manual_seed(42)
+
 def initialize_rope_embeddings(HEAD_DIM):
     angles = (torch.rand((1, HEAD_DIM), dtype=torch.float32) * (2 * torch.pi)).to(0)
     h_cos = torch.cos(angles)
@@ -88,22 +90,22 @@ def test_deepseek_decode_e2e():
     # RoPE with cos and sin
     cos, sin = initialize_rope_embeddings(pe_head_dim)
     # Our kernel
-    # o = deepseek_decoder_layer(
-    #     input_tensor,          
-    #     weight_q_nope,
-    #     weight_q_pe,
-    #     weight_uk,
-    #     weight_kv_nope,
-    #     weight_k_pe,
-    #     weight_uv,                          
-    #     weight_o,              
-    #     ckv_cache,              
-    #     rms_input_weight,      
-    #     rms_ckv_weight,       
-    #     cos,                   
-    #     sin                    
-    # )
-    # print(o.shape, o)
+    o = deepseek_decoder_layer(
+        input_tensor,          
+        weight_q_nope,
+        weight_q_pe,
+        weight_uk,
+        weight_kv_nope,
+        weight_k_pe,
+        weight_uv,                          
+        weight_o,              
+        ckv_cache,              
+        rms_input_weight,      
+        rms_ckv_weight,       
+        cos,                   
+        sin                    
+    )
+    print(o.shape, o)
 
     eps = 1e-6
     rms_input_weight = rms_input_weight.reshape((hidden_size,))
@@ -120,14 +122,14 @@ def test_deepseek_decode_e2e():
     nvtx.range_pop()
     print(o_gt.shape, o_gt)
 
-    # mae = (o - o_gt).abs().mean()
-    # print("Mean Absolute Error (MAE):", mae.item())
+    mae = (o - o_gt).abs().mean()
+    print("Mean Absolute Error (MAE):", mae.item())
 
-    # mse = ((o - o_gt) ** 2).mean()
-    # print("Mean Squared Error (MSE):", mse.item())
+    mse = ((o - o_gt) ** 2).mean()
+    print("Mean Squared Error (MSE):", mse.item())
 
-    # max_error = (o - o_gt).abs().max()
-    # print("Max Error:", max_error.item())
+    max_error = (o - o_gt).abs().max()
+    print("Max Error:", max_error.item())
 
 if __name__ == "__main__":
     test_deepseek_decode_e2e()

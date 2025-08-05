@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import flashinfer
-import flash_attn_interface
 import torch.cuda.nvtx as nvtx
 from clusterfusion import llama_decoder_layer
 
@@ -12,6 +11,8 @@ seqlen = 4096
 head_dim = hidden_size // num_heads
 ffn_dim_gt = 11008  
 ffn_dim_fuse = 12288    
+
+torch.manual_seed(42)
 
 def initialize_rope_embeddings(HEAD_DIM):
     angles = (torch.rand((1, HEAD_DIM), dtype=torch.float32) * (2 * torch.pi)).to(0)
@@ -34,9 +35,9 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, cos, sin):
-    # residual = torch.zeros(hidden.shape).to(0).half()
-    # flashinfer.fused_add_rmsnorm(hidden, residual, rms_input_weight, eps)
-    # residual = hidden
+    residual = torch.zeros(hidden.shape).to(0).half()
+    flashinfer.fused_add_rmsnorm(hidden, residual, rms_input_weight, eps)
+    residual = hidden
     qkv_new = qkv_proj(hidden).view(3, 32, head_dim)
     q = qkv_new[0].view(1, 32, head_dim)
     k_new = qkv_new[1].view(1, 32, head_dim)
@@ -50,13 +51,13 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
     )
     o = o_proj(o.view(1, 32 * head_dim))
     # flashinfer.fused_add_rmsnorm(o, residual, rms_attn_weight, eps)
-    o_ffn = F.relu(gate_proj(o)) * up_proj(o)
-    o = down_proj(o_ffn)
+    # o_ffn = F.relu(gate_proj(o)) * up_proj(o)
+    # o = down_proj(o_ffn)
     return o.detach()
 
 # without ' * 0.1', the outputs of tilefusion and python both will be 'nan'
 def generate_random_weights(shape):
-    return (torch.randn(shape) * 0.1).to(0).half()
+    return (torch.randn(shape) * 0.2).to(0).half()
 
 def test_llama_decode_e2e():
     # Generate random weights
@@ -85,20 +86,20 @@ def test_llama_decode_e2e():
     # RoPE with cos and sin
     cos, sin = initialize_rope_embeddings(head_dim)
     # Our kernel
-    # o = llama_decoder_layer(
-    #     input_tensor,          
-    #     weight_qkv,                          
-    #     weight_o,              
-    #     kv_cache_full[0],
-    #     kv_cache_full[1],           
-    #     gate_up_proj_weight_fuse,      
-    #     down_proj_weight_fuse,      
-    #     rms_input_weight,      
-    #     rms_attn_weight,       
-    #     cos,                   
-    #     sin                    
-    # )
-    # print(o.shape, o)
+    o = llama_decoder_layer(
+        input_tensor,          
+        weight_qkv,                          
+        weight_o,              
+        kv_cache_full[0],
+        kv_cache_full[1],           
+        gate_up_proj_weight_fuse,      
+        down_proj_weight_fuse,      
+        rms_input_weight,      
+        rms_attn_weight,       
+        cos,                   
+        sin                    
+    )
+    print(o.shape, o)
 
     eps = 1e-6
     rms_input_weight = rms_input_weight.reshape((hidden_size,))
@@ -127,14 +128,14 @@ def test_llama_decode_e2e():
     nvtx.range_pop()
     print(o_gt.shape, o_gt)
 
-    # mae = (o - o_gt).abs().mean()
-    # print("Mean Absolute Error (MAE):", mae.item())
+    mae = (o - o_gt).abs().mean()
+    print("Mean Absolute Error (MAE):", mae.item())
 
-    # mse = ((o - o_gt) ** 2).mean()
-    # print("Mean Squared Error (MSE):", mse.item())
+    mse = ((o - o_gt) ** 2).mean()
+    print("Mean Squared Error (MSE):", mse.item())
 
-    # max_error = (o - o_gt).abs().max()
-    # print("Max Error:", max_error.item())
+    max_error = (o - o_gt).abs().max()
+    print("Max Error:", max_error.item())
 
 if __name__ == "__main__":
     test_llama_decode_e2e()
