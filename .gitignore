@@ -2,3 +2,4 @@
 clusterfusion/build/
 clusterfusion/clusterfusion.egg-info/
 dist/
+**/.DS_Store
