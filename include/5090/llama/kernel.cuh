@@ -35,15 +35,15 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     const uint32_t tile_col = tid % NUM_THREAD_PER_ROW_2;
 
     // Init shared memory
-    __shared__ __align__(16) half input_shmem[DIM_PER_BLOCK];
-    __shared__ float reduction[2 * NUM_PER_ROW_2];
-    __shared__ alignas(128) half weight[2 * TMA_LOAD_ONCE * MAX_SMEM_DIM];
-    __shared__ __align__(16) half local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM + HEAD_DIM];
-    // extern __shared__ uint8_t shmem_base[];
-    // half* input_shmem = reinterpret_cast<half*>(shmem_base);
-    // float* reduction  = reinterpret_cast<float*>(shmem_base + DIM_PER_BLOCK * sizeof(half));
-    // half* weight      = reinterpret_cast<half*>((uintptr_t)(shmem_base + DIM_PER_BLOCK * sizeof(half) + 2 * NUM_PER_ROW_2 * sizeof(float)) + 127 & ~127);
-    // half* local_qkv   = reinterpret_cast<half*>((uintptr_t)(weight + 2 * TMA_LOAD_ONCE * MAX_SMEM_DIM) + 127 & ~127);
+    // __shared__ __align__(16) half input_shmem[DIM_PER_BLOCK];
+    // __shared__ float reduction[2 * NUM_PER_ROW_2];
+    // __shared__ alignas(128) half weight[2 * TMA_LOAD_ONCE * MAX_SMEM_DIM];
+    // __shared__ __align__(16) half local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM + HEAD_DIM];
+    extern __shared__ uint8_t shmem_base[];
+    half* input_shmem = reinterpret_cast<half*>(shmem_base);
+    float* reduction  = reinterpret_cast<float*>(shmem_base + DIM_PER_BLOCK * sizeof(half));
+    half* weight      = reinterpret_cast<half*>((uintptr_t)(shmem_base + DIM_PER_BLOCK * sizeof(half) + 2 * NUM_PER_ROW_2 * sizeof(float)) + 127 & ~127);
+    half* local_qkv   = reinterpret_cast<half*>((uintptr_t)(weight + 2 * TMA_LOAD_ONCE * MAX_SMEM_DIM) + 127 & ~127);
 
     __shared__ float cluster_local_sum, cluster_local_max;
 
@@ -528,19 +528,9 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         for (int mask = (NUM_THREAD_PER_ROW_3 >> 1); mask > 0; mask >>= 1) {
             tmp += __shfl_down_sync(0xffffffff, tmp, mask);
         }
-        // if (lane_id % NUM_THREAD_PER_ROW_3 == 0) {
-        //     atomicAdd(&output[cluster_block_st_id + weight_idx_3 + (id - 1) * TMA_LOAD_ONCE], __float2half(tmp));
-        // }
         if (lane_id % NUM_THREAD_PER_ROW_3 == 0) {
-            float final_tmp = tmp;
-            for (int offset = 16; offset > 0; offset /= 2)
-                final_tmp += __shfl_down_sync(0xffffffff, final_tmp, offset);
-
-            if (lane_id == 0) {
-                output[cluster_block_st_id + weight_idx_3 + (id - 1) * TMA_LOAD_ONCE] = __float2half(final_tmp);
-            }
+            atomicAdd(&output[cluster_block_st_id + weight_idx_3 + (id - 1) * TMA_LOAD_ONCE], __float2half(tmp));
         }
-
         block.sync();
     }
     bar[1].wait(std::move(token[1]));
@@ -557,19 +547,9 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     for (int mask = (NUM_THREAD_PER_ROW_3 >> 1); mask > 0; mask >>= 1) {
         tmp += __shfl_down_sync(0xffffffff, tmp, mask);
     }
-    // if (lane_id % NUM_THREAD_PER_ROW_3 == 0) {
-    //     atomicAdd(&output[cluster_block_st_id + weight_idx_3 + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE], __float2half(tmp));
-    // }
     if (lane_id % NUM_THREAD_PER_ROW_3 == 0) {
-        float final_tmp = tmp;
-        for (int offset = 16; offset > 0; offset /= 2)
-            final_tmp += __shfl_down_sync(0xffffffff, final_tmp, offset);
-
-        if (lane_id == 0) {
-            output[cluster_block_st_id + weight_idx_3 + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE] = __float2half(final_tmp);
-        }
+        atomicAdd(&output[cluster_block_st_id + weight_idx_3 + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE], __float2half(tmp));
     }
-
     cluster.sync();
 
     // // Fused residual and RMSNorm
