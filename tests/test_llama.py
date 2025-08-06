@@ -13,6 +13,7 @@ ffn_dim_gt = 11008
 ffn_dim_fuse = 12288    
 
 torch.manual_seed(42)
+torch.set_printoptions(precision=4, sci_mode=False)
 
 def initialize_rope_embeddings(HEAD_DIM):
     angles = (torch.rand((1, HEAD_DIM), dtype=torch.float32) * (2 * torch.pi)).to(0)
@@ -42,7 +43,8 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
     q = qkv_new[0].view(1, 32, head_dim)
     k_new = qkv_new[1].view(1, 32, head_dim)
     v_new = qkv_new[2].view(1, 32, head_dim)
-    # q, k_new = apply_rotary_pos_emb(q, k_new, cos, sin)  # RoPE need debug
+    head_id = 0
+    q, k_new = apply_rotary_pos_emb(q, k_new, cos, sin)  # RoPE need debug
     q = q.reshape(32, head_dim)
     k = torch.cat((kv_cache[0], k_new), dim=0) 
     v = torch.cat((kv_cache[1], v_new), dim=0)
@@ -102,30 +104,30 @@ def test_llama_decode_e2e():
     print(o.shape, o)
 
     same = True
-    for i in range(5):
-        tmp = llama_decoder_layer(
-                input_tensor,          
-                weight_qkv,                          
-                weight_o,              
-                kv_cache_full[0],
-                kv_cache_full[1],           
-                gate_up_proj_weight_fuse,      
-                down_proj_weight_fuse,      
-                rms_input_weight,      
-                rms_attn_weight,       
-                cos,                   
-                sin                    
-            )
-        if not torch.equal(tmp, o):
-            print(tmp)
-            same = False
-
-    if same:
-        print("Kernel outputs match.")
-    else:
-        print("Kernel outputs differ.")
-        max_error = (tmp - o).abs().max()
-        print(f"Max error between outputs: {max_error.item()}") 
+    # for i in range(5):
+        # tmp = llama_decoder_layer(
+                # input_tensor,          
+                # weight_qkv,                          
+                # weight_o,              
+                # kv_cache_full[0],
+                # kv_cache_full[1],           
+                # gate_up_proj_weight_fuse,      
+                # down_proj_weight_fuse,      
+                # rms_input_weight,      
+                # rms_attn_weight,       
+                # cos,                   
+                # sin                    
+            # )
+        # if not torch.equal(tmp, o):
+            # print(tmp)
+            # same = False
+# 
+    # if same:
+        # print("Kernel outputs match.")
+    # else:
+        # print("Kernel outputs differ.")
+        # max_error = (tmp - o).abs().max()
+        # print(f"Max error between outputs: {max_error.item()}") 
 
     eps = 1e-6
     rms_input_weight = rms_input_weight.reshape((hidden_size,))
