@@ -6,6 +6,18 @@ using barrier = cuda::barrier<cuda::thread_scope_block>;
 namespace cde = cuda::device::experimental;
 namespace cg = cooperative_groups;
 
+__device__ inline float2 __fmul2(float2 a, float2 b) {
+    return make_float2(a.x * b.x, a.y * b.y);
+}
+
+__device__ inline float2 __fadd2(float2 a, float2 b) {
+    return make_float2(a.x + b.x, a.y + b.y);
+}
+
+__device__ inline float2 __half22float2_rn(__half2 h) {
+    return make_float2(__low2float(h), __high2float(h));
+}
+
 __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     half* output, // 1 * hidden_dim
     half* input,  // 1 * hidden_dim
@@ -277,6 +289,10 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, local_qkv, weight);
 
+    if (warp_id == 0 && head_id == 0 && tid == 0) {
+        printf("%f %f %f \n", __half2float(local_qkv[0]), __half2float(local_qkv[1]), __half2float(local_qkv[2]));
+    }
+
     // Compute RoPE
     if (tid < HEAD_DIM / 2) {
         q_rope = *(half2*)(&local_qkv[tid * 2]);
@@ -284,16 +300,22 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         if (tid * 2 < HEAD_DIM / 2) {
             q_rope_1 = *(half2*)(&local_qkv[HEAD_DIM / 2 + tid * 2]);
             k_rope_1 = *(half2*)(&local_qkv[HEAD_DIM + HEAD_DIM / 2 + tid * 2]);
-            cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
-            sin_reg = {-sin[HEAD_DIM / 2 + tid * 2], -sin[HEAD_DIM / 2 + tid * 2 + 1]};
+            cos_reg = make_float2(cos[tid * 2], cos[tid * 2 + 1]);
+            sin_reg = make_float2(-sin[tid * 2], -sin[tid * 2 + 1]);
         } else {
             q_rope_1 = *(half2*)(&local_qkv[tid * 2 - HEAD_DIM / 2]);
             k_rope_1 = *(half2*)(&local_qkv[HEAD_DIM + tid * 2 - HEAD_DIM / 2]);
-            cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
-            sin_reg = {sin[tid * 2 - HEAD_DIM / 2], sin[tid * 2 + 1 - HEAD_DIM / 2]};
+            cos_reg = make_float2(cos[tid * 2], cos[tid * 2 + 1]);
+            sin_reg = make_float2(sin[tid * 2], sin[tid * 2 + 1]);
         }
-        *(half2*)(&local_qkv[tid * 2]) = __hadd2(__hmul2(q_rope, __float22half2_rn(cos_reg)), __hmul2(q_rope_1, __float22half2_rn(sin_reg)));
-        *(half2*)(&local_qkv[HEAD_DIM + tid * 2]) = __hadd2(__hmul2(k_rope, __float22half2_rn(cos_reg)), __hmul2(k_rope_1, __float22half2_rn(sin_reg)));
+    }
+
+    block.sync();
+    cluster.sync();
+
+    if (tid < HEAD_DIM / 2) {
+        *(half2*)(&local_qkv[tid * 2]) = __float22half2_rn(__fadd2(__fmul2(__half22float2_rn(q_rope), cos_reg), __fmul2(__half22float2_rn(q_rope_1), sin_reg)));
+        *(half2*)(&local_qkv[HEAD_DIM + tid * 2]) = __float22half2_rn(__fadd2(__fmul2(__half22float2_rn(k_rope), cos_reg), __fmul2(__half22float2_rn(k_rope_1), sin_reg)));
     }
 
     // Compute flash-decoding
