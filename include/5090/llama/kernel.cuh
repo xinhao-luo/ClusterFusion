@@ -6,6 +6,7 @@ using barrier = cuda::barrier<cuda::thread_scope_block>;
 namespace cde = cuda::device::experimental;
 namespace cg = cooperative_groups;
 
+/*
 __device__ inline float2 __fmul2(float2 a, float2 b) {
     return make_float2(a.x * b.x, a.y * b.y);
 }
@@ -17,6 +18,7 @@ __device__ inline float2 __fadd2(float2 a, float2 b) {
 __device__ inline float2 __half22float2_rn(__half2 h) {
     return make_float2(__low2float(h), __high2float(h));
 }
+*/
 
 __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     half* output, // 1 * hidden_dim
@@ -59,8 +61,9 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     float local_sum = 0.0, eps = 1e-6, rms_rcp = 0.0, tmp = 0.0, local_max = 0.0, pre_max = 0.0, scale = 0.0, softmax_scale = __frsqrt_rn(HEAD_DIM);
     half __align__(16) reg_input[NUM_PER_THREAD], reg_weight[NUM_PER_THREAD], reg_reduce[NUM_PER_THREAD];
     float* dst_shmem;
-    half2 q_rope, q_rope_1, k_rope, k_rope_1;
-    float2 cos_reg, sin_reg;
+    //half2 q_rope, q_rope_1, k_rope, k_rope_1;
+    //float2 cos_reg, sin_reg;
+    float q_rope, q_rope_1, k_rope, k_rope_1, cos_reg, sin_reg;
     uint32_t size;
     uint32_t src_addr, dst_addr, neighbor_dst_bar = 0;
     float __align__(16) qk[DEC_TILE];
@@ -286,6 +289,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         neighbor_dst_bar, local_qkv, weight);
 
     // Compute RoPE
+    /*
     if (tid < HEAD_DIM / 2) {
         q_rope = *(half2*)(&local_qkv[tid * 2]);
         k_rope = *(half2*)(&local_qkv[HEAD_DIM + tid * 2]);
@@ -303,11 +307,31 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     }
 
     block.sync();
-    cluster.sync();
 
     if (tid < HEAD_DIM / 2) {
         *(half2*)(&local_qkv[tid * 2]) = __float22half2_rn(__fadd2(__fmul2(__half22float2_rn(q_rope), cos_reg), __fmul2(__half22float2_rn(q_rope_1), sin_reg)));
         *(half2*)(&local_qkv[HEAD_DIM + tid * 2]) = __float22half2_rn(__fadd2(__fmul2(__half22float2_rn(k_rope), cos_reg), __fmul2(__half22float2_rn(k_rope_1), sin_reg)));
+    }
+    */
+
+    q_rope = __half2float(local_qkv[tid]);
+    k_rope = __half2float(local_qkv[HEAD_DIM + tid]);
+    cos_reg = cos[tid];
+    sin_reg = sin[tid];
+    if (tid < HEAD_DIM / 2) {
+        q_rope_1 = __half2float(local_qkv[HEAD_DIM / 2 + tid]);
+        k_rope_1 = __half2float(local_qkv[HEAD_DIM + HEAD_DIM / 2 + tid]);
+    } else {
+        q_rope_1 = __half2float(local_qkv[tid - HEAD_DIM / 2]);
+        k_rope_1 = __half2float(local_qkv[HEAD_DIM + tid - HEAD_DIM / 2]);
+    }
+    block.sync();
+    if (tid < HEAD_DIM / 2) {
+        local_qkv[tid] = __float2half(q_rope * cos_reg - q_rope_1 * sin_reg);
+        local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg - k_rope_1 * sin_reg);
+    } else {
+        local_qkv[tid] = __float2half(q_rope * cos_reg + q_rope_1 * sin_reg);
+        local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg + k_rope_1 * sin_reg);
     }
 
     // Compute flash-decoding
