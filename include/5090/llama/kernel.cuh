@@ -476,18 +476,18 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         reg_reduce[j] = __hmul(reg_reduce[j], __float2half(__frcp_rn(cluster_local_sum)));
     }
     if(tid < NUM_THREAD_PER_ROW_2) {
-        *(uint4*)(&local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM + tid * NUM_PER_THREAD]) = *(uint4*)(&reg_reduce[0]);
+        *(uint4*)(&local_qkv[2 * HEAD_DIM + tid * NUM_PER_THREAD]) = *(uint4*)(&reg_reduce[0]);
     }
     block.sync();
 
     // DSM Ring-All reduce
     size = HEAD_DIM * sizeof(half);
-    src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(&local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM]));
+    src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(&local_qkv[2 * HEAD_DIM]));
     dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(weight));
     dsm_ring_allreduce<CLUSTER_SIZE, Stage::ATTN>(
         size, tid, HEAD_DIM, cluster_block_id,  
         src_addr, dst_addr, bar_ptr, 
-        neighbor_dst_bar, &local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM], weight);
+        neighbor_dst_bar, &local_qkv[2 * HEAD_DIM], weight);
 
     // Compute output @ w_o
     // Preload w_o
@@ -508,7 +508,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         bar[(id - 1) % 2].wait(std::move(token[(id - 1) % 2]));
         tmp = 0.0;
         for (int j = 0; j < HEAD_DIM; j+=NUM_PER_ROW_3) {
-            *(uint4*)(&reg_input[0]) = *(uint4*)(&local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM + input_idx_3 + j]);
+            *(uint4*)(&reg_input[0]) = *(uint4*)(&local_qkv[2 * HEAD_DIM + input_idx_3 + j]);
             #pragma unroll
             for (int d = 0; d < NUM_PER_THREAD; d++) {
                 tmp += __half2float(__hmul(reg_input[d], weight[(id - 1) % 2 * TMA_LOAD_ONCE_NUM + (input_idx_3 + j + d) * TMA_LOAD_ONCE + weight_idx_3]));
@@ -526,7 +526,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     bar[1].wait(std::move(token[1]));
     tmp = 0.0;
     for (int j = 0; j < HEAD_DIM; j+=NUM_PER_ROW_3) {
-        *(uint4*)(&reg_input[0]) = *(uint4*)(&local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM + input_idx_3 + j]);
+        *(uint4*)(&reg_input[0]) = *(uint4*)(&local_qkv[2 * HEAD_DIM + input_idx_3 + j]);
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
             tmp += __half2float(__hmul(reg_input[d], weight[TMA_LOAD_ONCE_NUM + (input_idx_3 + j + d) * TMA_LOAD_ONCE + weight_idx_3]));
