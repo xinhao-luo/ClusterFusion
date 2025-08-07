@@ -458,7 +458,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     }
     block.sync();
 
-    *(uint4*)(&weight[tile_row * HEAD_DIM + tile_col * NUM_PER_THREAD]) = *(uint4*)(&reg_reduce[0]);
+    // *(uint4*)(&weight[tile_row * HEAD_DIM + tile_col * NUM_PER_THREAD]) = *(uint4*)(&reg_reduce[0]);
+    #pragma unroll
+    for (int i = 0; i < NUM_PER_THREAD; i++) {
+        weight[tile_row * HEAD_DIM + tile_col * NUM_PER_THREAD + i] = __float2half(reg_reduce[i]);
+    } 
     if (lane_id % NUM_THREAD_PER_ROW_2 == 0) {
         reduction[tile_row * 2] = local_max;
         reduction[tile_row * 2 + 1] = local_sum;
@@ -532,7 +536,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         reg_reduce[j] *= __frcp_rn(cluster_local_sum);
     }
     if(tid < NUM_THREAD_PER_ROW_2) {
-        *(uint4*)(&local_qkv[2 * HEAD_DIM + tid * NUM_PER_THREAD]) = *(uint4*)(&reg_reduce[0]);
+        // *(uint4*)(&local_qkv[2 * HEAD_DIM + tid * NUM_PER_THREAD]) = *(uint4*)(&reg_reduce[0]);
+        #pragma unroll
+        for (int i = 0; i < NUM_PER_THREAD; i++) {
+            local_qkv[2 * HEAD_DIM + tid * NUM_PER_THREAD + i] = __float2half(reg_reduce[i]);
+        }
     }
     block.sync();
 

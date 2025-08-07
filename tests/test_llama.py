@@ -13,7 +13,7 @@ ffn_dim_gt = 11008
 ffn_dim_fuse = 12288    
 
 torch.manual_seed(42)
-# torch.set_printoptions(precision=4, sci_mode=False)
+torch.set_printoptions(precision=4, sci_mode=False)
 
 def initialize_rope_embeddings(HEAD_DIM):
     angles = (torch.rand((1, HEAD_DIM), dtype=torch.float32) * (2 * torch.pi)).to(0)
