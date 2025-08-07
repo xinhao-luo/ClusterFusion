@@ -5,7 +5,7 @@
 
 int main(int argc, char** argv) {
     cudaFuncSetAttribute(LlamaDecoderLayerKernel, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
-    uint32_t max_shmem_size = ((((DIM_PER_BLOCK * sizeof(half) + 2 * DIM_BLOCK_REDUCE * sizeof(float) + 127) & ~127) +  2 * TMA_LOAD_ONCE * MAX_SMEM_DIM * sizeof(half) + 127) & ~127) + (3 * HEAD_DIM) * sizeof(half);
+    uint32_t max_shmem_size = (2 * TMA_LOAD_ONCE * MAX_SMEM_DIM + DIM_PER_BLOCK + 3 * HEAD_DIM) * sizeof(half) + 2 * DIM_BLOCK_REDUCE * sizeof(float);
     cudaFuncSetAttribute(LlamaDecoderLayerKernel, cudaFuncAttributeMaxDynamicSharedMemorySize, max_shmem_size);
     
     // Init input
