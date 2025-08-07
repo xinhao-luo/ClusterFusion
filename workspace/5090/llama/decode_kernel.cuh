@@ -59,7 +59,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     uint32_t size;
     uint32_t src_addr, dst_addr, neighbor_dst_bar = 0;
     float __align__(16) qk[DEC_TILE];
-    float tmp_ffn[FFN_DIM_PER_CLUSTER / HEAD_DIM];
 
     // Init barrier
     #pragma nv_diag_suppress static_var_with_dynamic_init
@@ -88,7 +87,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     uint weight_idx_3 = warp_id * NUM_ROW_PER_WARP_3 + lane_id / NUM_THREAD_PER_ROW_3;
     uint cluster_block_st_id = cluster_block_id * DIM_PER_BLOCK;
     uint cluster_head_idx = head_id * HEAD_DIM;
-    uint cluster_head_ffn_idx = head_id * FFN_DIM_PER_CLUSTER;
 
     // RMSNorm
     for (int d = tid * 8; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 8) { 
