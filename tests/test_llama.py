@@ -155,7 +155,6 @@ def test_llama_decode_e2e():
     nvtx.range_push("llama_decode")
     o_gt = llama_decode(input_tensor, rms_input_weight, rms_attn_weight, eps, kv_cache_gt, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, cos, sin)
     nvtx.range_pop()
-    print(o_gt.shape, o_gt)
 
     max_error_overall = 0
     count_of_large_error = 0
@@ -174,6 +173,8 @@ def test_llama_decode_e2e():
     
     print("Max Error Overall:", max_error_overall.item())
     print("Count of errors > 0.125:", count_of_large_error)
+    print(o[0])
+    print(o_gt.shape, o_gt)
 
 if __name__ == "__main__":
     test_llama_decode_e2e()
