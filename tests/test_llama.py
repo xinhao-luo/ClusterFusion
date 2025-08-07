@@ -175,7 +175,7 @@ def test_llama_decode_e2e():
     print(f"Max Error in MAE of {test_run} runs", max(mae_list).item())
     print(f"Max Error in MSE of {test_run} runs", max(mse_list).item())
     print(f"Max Error in Max Errors of {test_run} runs", max(max_error_list).item())
-    print(f"Count of Max Errors > 0.1: {sum(e.item() > 1 for e in max_error_list)}")
+    print(f"Count of Max Errors > 0.1: {sum(e.item() > 0.1 for e in max_error_list)}")
 
 if __name__ == "__main__":
     test_llama_decode_e2e()
