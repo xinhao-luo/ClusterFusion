@@ -13,6 +13,7 @@ ffn_dim_gt = 11008
 ffn_dim_fuse = 12288    
 
 torch.manual_seed(42)
+# torch.set_printoptions(precision=4, sci_mode=False)
 
 def initialize_rope_embeddings(HEAD_DIM):
     angles = (torch.rand((1, HEAD_DIM), dtype=torch.float32) * (2 * torch.pi)).to(0)
@@ -36,13 +37,14 @@ def rotate_half(x):
 
 def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, cos, sin):
     residual = torch.zeros(hidden.shape).to(0).half()
-    flashinfer.fused_add_rmsnorm(hidden, residual, rms_input_weight, eps) # RMSNorm
+    flashinfer.fused_add_rmsnorm(hidden, residual, rms_input_weight, eps)
     residual = hidden
-    qkv_new = qkv_proj(hidden).view(3, 32, head_dim) # QKV
+    qkv_new = qkv_proj(hidden).view(3, 32, head_dim)
     q = qkv_new[0].view(1, 32, head_dim)
     k_new = qkv_new[1].view(1, 32, head_dim)
     v_new = qkv_new[2].view(1, 32, head_dim)
-    q, k_new = apply_rotary_pos_emb(q, k_new, cos, sin) # RoPE
+    head_id = 0
+    q, k_new = apply_rotary_pos_emb(q, k_new, cos, sin)  # RoPE need debug
     q = q.reshape(32, head_dim)
     k = torch.cat((kv_cache[0], k_new), dim=0) 
     v = torch.cat((kv_cache[1], v_new), dim=0)
@@ -86,21 +88,48 @@ def test_llama_decode_e2e():
     # RoPE with cos and sin
     cos, sin = initialize_rope_embeddings(head_dim)
     # Our kernel
-    o = llama_decoder_layer(
-        input_tensor,          
-        weight_qkv,                          
-        weight_o,              
-        kv_cache_full[0],
-        kv_cache_full[1],           
-        gate_up_proj_weight_fuse,      
-        down_proj_weight_fuse,      
-        rms_input_weight,      
-        rms_attn_weight,       
-        cos,                   
-        sin                    
-    )
-    print(o.shape, o)
+    o = []
+    test_run = 100
+    for i in range(test_run):
+        o.append(llama_decoder_layer(
+            input_tensor,          
+            weight_qkv,                          
+            weight_o,              
+            kv_cache_full[0],
+            kv_cache_full[1],           
+            gate_up_proj_weight_fuse,      
+            down_proj_weight_fuse,      
+            rms_input_weight,      
+            rms_attn_weight,       
+            cos,                   
+            sin                    
+        ))
 
+
+    # for i in range(5):
+        # tmp = llama_decoder_layer(
+                # input_tensor,          
+                # weight_qkv,                          
+                # weight_o,              
+                # kv_cache_full[0],
+                # kv_cache_full[1],           
+                # gate_up_proj_weight_fuse,      
+                # down_proj_weight_fuse,      
+                # rms_input_weight,      
+                # rms_attn_weight,       
+                # cos,                   
+                # sin                    
+            # )
+        # if not torch.equal(tmp, o):
+            # print(tmp)
+            # same = False
+# 
+    # if same:
+        # print("Kernel outputs match.")
+    # else:
+        # print("Kernel outputs differ.")
+        # max_error = (tmp - o).abs().max()
+        # print(f"Max error between outputs: {max_error.item()}") 
     eps = 1e-6
     rms_input_weight = rms_input_weight.reshape((hidden_size,))
     rms_attn_weight = rms_attn_weight.reshape((hidden_size,))
@@ -128,14 +157,19 @@ def test_llama_decode_e2e():
     nvtx.range_pop()
     print(o_gt.shape, o_gt)
 
-    mae = (o - o_gt).abs().mean()
-    print("Mean Absolute Error (MAE):", mae.item())
+    max_error_overall = 0
+    for i in range(test_run):
+        mae = (o[i] - o_gt).abs().mean()
+        print("Mean Absolute Error (MAE):", mae.item())
 
-    mse = ((o - o_gt) ** 2).mean()
-    print("Mean Squared Error (MSE):", mse.item())
+        mse = ((o[i] - o_gt) ** 2).mean()
+        print("Mean Squared Error (MSE):", mse.item())
 
-    max_error = (o - o_gt).abs().max()
-    print("Max Error:", max_error.item())
+        max_error = (o[i] - o_gt).abs().max()
+        print("Max Error:", max_error.item())
+        max_error_overall = max(max_error, max_error_overall)
+    
+    print("Max Error Overall:", max_error_overall.item())
 
 if __name__ == "__main__":
     test_llama_decode_e2e()
