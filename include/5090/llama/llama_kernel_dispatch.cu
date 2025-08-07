@@ -223,5 +223,6 @@ torch::Tensor llama_decoder_layer_sm120(
         tensor_map_weight_down_
     );
     cudaDeviceSynchronize();
+    cudaFree(reduce_workspace);
     return o;
 }

@@ -10,18 +10,18 @@ def _get_arch():
     if sm == 90:
         return "sm90a", "COMPILE_SM90"
     elif sm == 120:
-        return "sm120a", "COMPILE_SM120"
+        return "sm120", "COMPILE_SM120"
     else:
         raise RuntimeError(f"Unsupported SM version: {sm}")
 
 _arch, _macro = _get_arch()
 
-if _arch == "sm120a":
+if _arch == "sm120":
     sources = [
         "include/pybind.cpp",
         "include/5090/llama/llama_kernel_dispatch.cu",
     ]
-    gencode = "-gencode=arch=compute_120a,code=sm_120a"
+    gencode = "-gencode=arch=compute_120,code=sm_120"
 elif _arch == "sm90a":
     sources = [
         "include/pybind.cpp",
