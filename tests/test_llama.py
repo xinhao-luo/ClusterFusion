@@ -156,7 +156,7 @@ def test_llama_decode_e2e():
     o_gt = llama_decode(input_tensor, rms_input_weight, rms_attn_weight, eps, kv_cache_gt, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, cos, sin)
     nvtx.range_pop()
     print(o_gt.shape, o_gt)
-    max_errors = []
+    max_error_list = []
     mse_list = []
     mae_list = []
     for i in range(test_run):
@@ -169,12 +169,13 @@ def test_llama_decode_e2e():
         # print("Mean Squared Error (MSE):", mse.item())
 
         max_error = (o[i] - o_gt).abs().max()
-        max_errors.append(max_error)
+        max_error_list.append(max_error)
         # print("Max Error:", max_error.item())
 
     print(f"Max Error in MAE of {test_run} runs", max(mae_list).item())
     print(f"Max Error in MSE of {test_run} runs", max(mse_list).item())
-    print(f"Max Error in Max Errors of {test_run} runs", max(max_errors).item())
+    print(f"Max Error in Max Errors of {test_run} runs", max(max_error_list).item())
+    print(f"Count of Max Errors > 0.1: {sum(e.item() > 1 for e in max_error_list)}")
 
 if __name__ == "__main__":
     test_llama_decode_e2e()
