@@ -89,7 +89,7 @@ def test_llama_decode_e2e():
     cos, sin = initialize_rope_embeddings(head_dim)
     # Our kernel
     o = []
-    test_run = 1000
+    test_run = 10000
     for i in range(test_run):
         o.append(llama_decoder_layer(
             input_tensor,          
