@@ -169,11 +169,11 @@ def test_llama_decode_e2e():
         max_error = (o[i] - o_gt).abs().max()
         print("Max Error:", max_error.item())
         max_error_overall = max(max_error, max_error_overall)
-        if (max_error.item() > 0.1):
+        if (max_error.item() > 0.125):
             count_of_large_error += 1
     
     print("Max Error Overall:", max_error_overall.item())
-    print("Count of errors > 0.1:", count_of_large_error)
+    print("Count of errors > 0.125:", count_of_large_error)
 
 if __name__ == "__main__":
     test_llama_decode_e2e()

@@ -20,6 +20,12 @@ __device__ inline float2 __half22float2_rn(__half2 h) {
 }
 */
 
+__device__ __forceinline__ float ptx_exp2(float x) {
+  float y;
+  asm volatile("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
+  return y;
+}
+
 __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     half* output, // 1 * hidden_dim
     half* input,  // 1 * hidden_dim
@@ -58,7 +64,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     __shared__ float cluster_local_sum, cluster_local_max;
 
     // Init registers
-    float local_sum = 0.0, eps = 1e-6, rms_rcp = 0.0, tmp = 0.0, local_max = 0.0, pre_max = 0.0, scale = 0.0, softmax_scale = __frsqrt_rn(HEAD_DIM);
+    float local_sum = 0.0, eps = 1e-6, rms_rcp = 0.0, tmp = 0.0, local_max = 0.0, pre_max = 0.0, scale = 0.0, softmax_scale = __frsqrt_rn(HEAD_DIM) * 1.44269504088896340736f; // log_2 e
     half __align__(16) reg_input[NUM_PER_THREAD], reg_weight[NUM_PER_THREAD], reg_reduce[NUM_PER_THREAD];
     float* dst_shmem;
     //half2 q_rope, q_rope_1, k_rope, k_rope_1;
@@ -376,11 +382,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
             qk[j] = qk[j] * softmax_scale;
             local_max = max(local_max, qk[j]);
         }
-        scale = __expf(pre_max - local_max);
+        scale = ptx_exp2(pre_max - local_max);
         local_sum *= scale;
         #pragma unroll
         for (int j = 0; j < DEC_TILE; j++) {
-            qk[j] = __expf(qk[j] - local_max);
+            qk[j] = ptx_exp2(qk[j] - local_max);
             local_sum += qk[j];
         }
         #pragma unroll
@@ -423,11 +429,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         qk[j] = qk[j] * softmax_scale;
         local_max = max(local_max, qk[j]);
     }
-    scale = __expf(pre_max - local_max);
+    scale = ptx_exp2(pre_max - local_max);
     local_sum *= scale;
     #pragma unroll
     for (int j = 0; j < DEC_TILE; j++) {
-        qk[j] = __expf(qk[j] - local_max);
+        qk[j] = ptx_exp2(qk[j] - local_max);
         local_sum += qk[j];
     }
     #pragma unroll
@@ -462,12 +468,12 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         float m = reduction[j * 2], s = reduction[j * 2 + 1];
         pre_max = local_max;
         local_max = max(m, local_max);
-        scale = __expf(m - local_max);
+        scale = ptx_exp2(m - local_max);
         s *= scale;
-        local_sum = local_sum * __expf(pre_max - local_max) + s;
+        local_sum = local_sum * ptx_exp2(pre_max - local_max) + s;
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
-            reg_reduce[d] = __hadd(__hmul(reg_reduce[d], __float2half(__expf(pre_max - local_max))), __hmul(reg_input[d], __float2half(scale)));
+            reg_reduce[d] = __hadd(__hmul(reg_reduce[d], __float2half(ptx_exp2(pre_max - local_max))), __hmul(reg_input[d], __float2half(scale)));
         }
     }
     block.sync();
@@ -490,7 +496,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         }
         cluster.sync();
     }
-    scale = __expf(pre_max - cluster_local_max);
+    scale = ptx_exp2(pre_max - cluster_local_max);
     local_sum *= scale;
     #pragma unroll
     for (int j = 0; j < NUM_PER_THREAD; j++) {
