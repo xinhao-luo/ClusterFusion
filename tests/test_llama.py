@@ -89,7 +89,7 @@ def test_llama_decode_e2e():
     cos, sin = initialize_rope_embeddings(head_dim)
     # Our kernel
     o = []
-    test_run = 100
+    test_run = 10000
     for i in range(test_run):
         o.append(llama_decoder_layer(
             input_tensor,          
@@ -158,6 +158,7 @@ def test_llama_decode_e2e():
     print(o_gt.shape, o_gt)
 
     max_error_overall = 0
+    count_of_large_error = 0
     for i in range(test_run):
         mae = (o[i] - o_gt).abs().mean()
         print("Mean Absolute Error (MAE):", mae.item())
@@ -168,8 +169,11 @@ def test_llama_decode_e2e():
         max_error = (o[i] - o_gt).abs().max()
         print("Max Error:", max_error.item())
         max_error_overall = max(max_error, max_error_overall)
+        if (max_error.item() > 0.1):
+            count_of_large_error += 1
     
     print("Max Error Overall:", max_error_overall.item())
+    print("Count of errors > 0.1:", count_of_large_error)
 
 if __name__ == "__main__":
     test_llama_decode_e2e()
