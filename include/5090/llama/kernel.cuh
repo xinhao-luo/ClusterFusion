@@ -42,10 +42,14 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     // __shared__ alignas(128) half weight[2 * TMA_LOAD_ONCE * MAX_SMEM_DIM];
     // __shared__ __align__(16) half local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM + HEAD_DIM];
     extern __shared__ uint8_t shmem_base[];
-    half* input_shmem = reinterpret_cast<half*>(shmem_base);
-    float* reduction  = reinterpret_cast<float*>(shmem_base + DIM_PER_BLOCK * sizeof(half));
-    half* weight      = reinterpret_cast<half*>((uintptr_t)(shmem_base + DIM_PER_BLOCK * sizeof(half) + 2 * DIM_BLOCK_REDUCE * sizeof(float)) + 127 & ~127);
-    half* local_qkv   = reinterpret_cast<half*>((uintptr_t)(weight + 2 * TMA_LOAD_ONCE * MAX_SMEM_DIM) + 127 & ~127);
+    half* weight = reinterpret_cast<half*>((uintptr_t)(shmem_base) + 127 & ~127);
+    half* local_qkv = weight + 2 * TMA_LOAD_ONCE * MAX_SMEM_DIM;
+    half* input_shmem = local_qkv + 3 * HEAD_DIM;
+    float* reduction = reinterpret_cast<float*>(input_shmem + DIM_PER_BLOCK);
+    // half* input_shmem = reinterpret_cast<half*>(shmem_base);
+    // float* reduction  = reinterpret_cast<float*>(shmem_base + DIM_PER_BLOCK * sizeof(half));
+    // half* weight      = reinterpret_cast<half*>((uintptr_t)(shmem_base + DIM_PER_BLOCK * sizeof(half) + 2 * DIM_BLOCK_REDUCE * sizeof(float)) + 127 & ~127);
+    // half* local_qkv   = reinterpret_cast<half*>((uintptr_t)(weight + 2 * TMA_LOAD_ONCE * MAX_SMEM_DIM) + 127 & ~127);
 
     __shared__ float cluster_local_sum, cluster_local_max;
 
