@@ -89,7 +89,7 @@ def test_llama_decode_e2e():
     cos, sin = initialize_rope_embeddings(head_dim)
     # Our kernel
     o = []
-    test_run = 100
+    test_run = 1000
     for i in range(test_run):
         o.append(llama_decoder_layer(
             input_tensor,          
@@ -156,15 +156,25 @@ def test_llama_decode_e2e():
     o_gt = llama_decode(input_tensor, rms_input_weight, rms_attn_weight, eps, kv_cache_gt, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, cos, sin)
     nvtx.range_pop()
     print(o_gt.shape, o_gt)
+    max_errors = []
+    mse_list = []
+    mae_list = []
     for i in range(test_run):
         mae = (o[i] - o_gt).abs().mean()
-        print("Mean Absolute Error (MAE):", mae.item())
+        mae_list.append(mae)
+        # print("Mean Absolute Error (MAE):", mae.item())
 
         mse = ((o[i] - o_gt) ** 2).mean()
-        print("Mean Squared Error (MSE):", mse.item())
+        mse_list.append(mse)
+        # print("Mean Squared Error (MSE):", mse.item())
 
         max_error = (o[i] - o_gt).abs().max()
-        print("Max Error:", max_error.item())
+        max_errors.append(max_error)
+        # print("Max Error:", max_error.item())
+
+    print(f"Max Error in MAE of {test_run} runs", max(mae_list).item())
+    print(f"Max Error in MSE of {test_run} runs", max(mse_list).item())
+    print(f"Max Error in Max Errors of {test_run} runs", max(max_errors).item())
 
 if __name__ == "__main__":
     test_llama_decode_e2e()
