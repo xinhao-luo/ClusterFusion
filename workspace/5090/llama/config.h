@@ -1,3 +1,4 @@
+#include <random>
 
 #define HEAD_DIM 128    
 #define HEAD_NUM 32     
@@ -36,3 +37,15 @@
 #define NUM_ROW_PER_WARP_3 (TMA_LOAD_ONCE / NUM_WARPS) 
 #define NUM_THREAD_PER_ROW_3 (WARP_SIZE / NUM_ROW_PER_WARP_3) 
 #define NUM_PER_ROW_3 (NUM_PER_THREAD * NUM_THREAD_PER_ROW_3) 
+
+template <typename T>
+void fill_matrix(T* mat, int sz) {
+    std::random_device r;
+    std::mt19937 rng(r());
+    std::normal_distribution<float> norm_dist(0.0, 0.1);
+    for (int i = 0; i < sz; i++) {
+        if constexpr(std::is_same<T, half>::value) {
+            mat[i] = __float2half(0.01f);
+        }   
+    }   
+}

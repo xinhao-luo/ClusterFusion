@@ -16,7 +16,7 @@ torch::Tensor llama_decoder_layer_sm120(
 ) 
 {
     cudaFuncSetAttribute(LlamaDecoderLayerKernel, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
-    uint32_t max_shmem_size = ((((DIM_PER_BLOCK * sizeof(half) + 2 * NUM_PER_ROW_2 * sizeof(float) + 127) & ~127) +  2 * TMA_LOAD_ONCE * MAX_SMEM_DIM * sizeof(half) + 127) & ~127) + (MAX_SMEM_DIM + MAX_SMEM_DIM + HEAD_DIM) * sizeof(half);
+    uint32_t max_shmem_size = ((((DIM_PER_BLOCK * sizeof(half) + 2 * DIM_BLOCK_REDUCE * sizeof(float) + 127) & ~127) +  2 * TMA_LOAD_ONCE * MAX_SMEM_DIM * sizeof(half) + 127) & ~127) + (3 * HEAD_DIM) * sizeof(half);
     cudaFuncSetAttribute(LlamaDecoderLayerKernel, cudaFuncAttributeMaxDynamicSharedMemorySize, max_shmem_size);
     auto options = torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA, 0);
     torch::Tensor o = torch::full({1, HIDDEN_DIM}, 0, options);
@@ -144,63 +144,6 @@ torch::Tensor llama_decoder_layer_sm120(
         CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
     );
 
-    uint64_t size_weight_gate_up_[rank] = {FFN_DIM, 2 * HIDDEN_DIM};
-    uint64_t stride_weight_gate_up_[rank - 1] = {FFN_DIM * sizeof(half)};
-    uint32_t box_size_weight_gate_up_[rank] = {FFN_DIM_PER_CLUSTER - TMA_LOAD_ONCE_MAX, TMA_LOAD_ONCE};
-    uint32_t elem_stride_weight_gate_up_[rank] = {1, 1};
-    CUresult res_weight_gate_up_ = cuTensorMapEncodeTiled(
-        &tensor_map_weight_gate_up_,                
-        CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_FLOAT16,
-        rank,                       
-        gate_up_proj_weight_ptr,                 
-        size_weight_gate_up_,                       
-        stride_weight_gate_up_,                     
-        box_size_weight_gate_up_,                 
-        elem_stride_weight_gate_up_,               
-        CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-        CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
-        CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
-        CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
-    );
-
-    uint64_t size_weight_down[rank] = {HIDDEN_DIM, FFN_DIM};
-    uint64_t stride_weight_down[rank - 1] = {HIDDEN_DIM * sizeof(half)};
-    uint32_t box_size_weight_down[rank] = {TMA_LOAD_ONCE, TMA_LOAD_ONCE_MAX};
-    uint32_t elem_stride_weight_down[rank] = {1, 1};
-    CUresult res_weight_down = cuTensorMapEncodeTiled(
-        &tensor_map_weight_down,                
-        CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_FLOAT16,
-        rank,                       
-        down_proj_weight_ptr,                
-        size_weight_down,                      
-        stride_weight_down,                   
-        box_size_weight_down,                 
-        elem_stride_weight_down,                
-        CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-        CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
-        CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
-        CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
-    );
-
-    uint64_t size_weight_down_[rank] = {HIDDEN_DIM, FFN_DIM};
-    uint64_t stride_weight_down_[rank - 1] = {HIDDEN_DIM * sizeof(half)};
-    uint32_t box_size_weight_down_[rank] = {TMA_LOAD_ONCE, FFN_DIM_PER_CLUSTER - TMA_LOAD_ONCE_MAX};
-    uint32_t elem_stride_weight_down_[rank] = {1, 1};
-    CUresult res_weight_down_ = cuTensorMapEncodeTiled(
-        &tensor_map_weight_down_,             
-        CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_FLOAT16,
-        rank,                     
-        down_proj_weight_ptr,               
-        size_weight_down_,                      
-        stride_weight_down_,                    
-        box_size_weight_down_,                   
-        elem_stride_weight_down_,               
-        CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-        CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
-        CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
-        CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
-    );
-
     dim3 grid(HEAD_NUM * CLUSTER_SIZE); 
     dim3 block(BLOCK_SIZE);
 
@@ -216,11 +159,7 @@ torch::Tensor llama_decoder_layer_sm120(
         tensor_map_weight,
         tensor_map_k_cache,
         tensor_map_v_cache,
-        tensor_map_weight_o,
-        tensor_map_weight_gate_up,
-        tensor_map_weight_gate_up_,
-        tensor_map_weight_down,
-        tensor_map_weight_down_
+        tensor_map_weight_o
     );
     cudaDeviceSynchronize();
     return o;
