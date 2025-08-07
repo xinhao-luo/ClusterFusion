@@ -102,7 +102,9 @@ def test_llama_decode_e2e():
     print(o.shape, o)
 
     same = True
-    for i in range(5):
+    diff_count = 0
+    max_error = 0
+    for i in range(10000):
         tmp = llama_decoder_layer(
                 input_tensor,          
                 weight_qkv,                          
@@ -118,14 +120,15 @@ def test_llama_decode_e2e():
             )
         if not torch.equal(tmp, o):
             same = False
-            print(tmp)
+            diff_count += 1
+            max_error = max(max_error, (tmp - o).abs().max())
 
     if same:
         print("Kernel outputs match.")
     else:
         print("Kernel outputs differ.")
-        max_error = (tmp - o).abs().max()
-        print(f"Max error between outputs: {max_error.item()}") 
+    print("Differ Count: ", diff_count)
+    print("Max Error: ", max_error.item())
 
     eps = 1e-6
     rms_input_weight = rms_input_weight.reshape((hidden_size,))
