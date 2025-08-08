@@ -22,7 +22,9 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     const __grid_constant__ CUtensorMap tensor_map, // 3 * hidden_dim * hidden_dim
     const __grid_constant__ CUtensorMap tensor_map_k_cache, // seqlen * head_num * head_dim
     const __grid_constant__ CUtensorMap tensor_map_v_cache, // seqlen * head_num * head_dim
-    const __grid_constant__ CUtensorMap tensor_map_weight_o // hidden_dim * hidden_dim
+    const __grid_constant__ CUtensorMap tensor_map_weight_o, // hidden_dim * hidden_dim
+    const uint32_t SEQ_LEN,
+    const uint32_t KV_DIM_PER_BLOCK
 ) {
     cg::grid_group grid             = cg::this_grid();
     cg::cluster_group cluster       = cg::this_cluster();

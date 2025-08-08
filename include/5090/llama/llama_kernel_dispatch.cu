@@ -34,6 +34,9 @@ torch::Tensor llama_decoder_layer_sm120(
     half* rms_attn_weight_ptr = reinterpret_cast<half*>(rms_attn_weight.data_ptr<at::Half>());
     float* cos_ptr = reinterpret_cast<float*>(cos.data_ptr<float>());
     float* sin_ptr = reinterpret_cast<float*>(sin.data_ptr<float>());
+
+    const uint32_t SEQ_LEN = k_cache.size(0);
+    const uint32_t KV_DIM_PER_BLOCK = SEQ_LEN / CLUSTER_SIZE;
     
     CUtensorMap tensor_map_weight{};
     CUtensorMap tensor_map_k_cache{};
@@ -157,7 +160,9 @@ torch::Tensor llama_decoder_layer_sm120(
         tensor_map_weight,
         tensor_map_k_cache,
         tensor_map_v_cache,
-        tensor_map_weight_o
+        tensor_map_weight_o,
+        SEQ_LEN,
+        KV_DIM_PER_BLOCK
     );
     cudaDeviceSynchronize();
     return o;
