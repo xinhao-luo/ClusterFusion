@@ -22,8 +22,6 @@ torch::Tensor llama_decoder_layer_sm120(
     auto options = torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA, 0);
     torch::Tensor o = torch::full({1, HIDDEN_DIM}, 0, options);
     half* o_ptr = reinterpret_cast<half*>(o.data_ptr<at::Half>());
-    half *reduce_workspace;
-    cudaMalloc(reinterpret_cast<void**>(&reduce_workspace), sizeof(half) * 1 * HIDDEN_DIM);
 
     half* input_ptr = reinterpret_cast<half*>(input.data_ptr<at::Half>());
     half* weight_qkv_ptr = reinterpret_cast<half*>(weight_qkv.data_ptr<at::Half>());
@@ -152,7 +150,6 @@ torch::Tensor llama_decoder_layer_sm120(
     LlamaDecoderLayerKernel<<<grid, block, max_shmem_size>>>(
         o_ptr,
         input_ptr,
-        reduce_workspace,
         rms_input_weight_ptr,
         rms_attn_weight_ptr,
         cos_ptr,
