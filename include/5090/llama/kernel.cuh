@@ -605,6 +605,22 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     }
     block.sync();
 
+#ifdef DEBUG
+    // DEBUG PRINT
+    if (tid == 0 && head_id == 0 && cluster_block_id == 2) {
+        printf("================= After Flash Decoding, Before Cluster Reduce =================\n");
+        printf("\nlocal_qkv[2 * HEAD_DIM: 2 * HEAD_DIM + 8] k_new[120: 128]\n");
+        for (int i = 2 * HEAD_DIM; i < 2 * HEAD_DIM + 8; i++) {
+            printf("%f ", __half2float(local_qkv[i]));
+        }
+        printf("\nlocal_qkv[3 * HEAD_DIM - 8: 3 * HEAD_DIM] k_new[120: 128]\n");
+        for (int i = 3 * HEAD_DIM - 8; i < 3 * HEAD_DIM; i++) {
+            printf("%f ", __half2float(local_qkv[i]));
+        }
+        printf("\n");
+    }
+#endif
+
     // DSM Ring-All reduce
     size = HEAD_DIM * sizeof(half);
     src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(&local_qkv[2 * HEAD_DIM]));
@@ -617,7 +633,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 #ifdef DEBUG
     // DEBUG PRINT
     if (tid == 0 && head_id == 0 && cluster_block_id == 2) {
-        printf("================= After Flash Decoding =================\n");
+        printf("================= After Flash Decoding & Cluster Reduce =================\n");
         printf("\nlocal_qkv[2 * HEAD_DIM: 2 * HEAD_DIM + 8] k_new[120: 128]\n");
         for (int i = 2 * HEAD_DIM; i < 2 * HEAD_DIM + 8; i++) {
             printf("%f ", __half2float(local_qkv[i]));
