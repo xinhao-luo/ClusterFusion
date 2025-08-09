@@ -531,8 +531,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         reg_reduce[i] = 0.0f;
     local_sum = 0.0, local_max = 0.0;
     #pragma unroll
-    for(int j = 0; j < DIM_BLOCK_REDUCE; j++) {
-        // TODO
+    for(int j = 0; j < DIM_BLOCK_REDUCE / 2; j++) {
         *(uint4*)(&reg_input[0]) = *(uint4*)(&weight[j * HEAD_DIM + tile_col * NUM_PER_THREAD]);
         float m = reduction[j * 2], s = reduction[j * 2 + 1];
         pre_max = local_max;
@@ -559,10 +558,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     if (tid == 0 && head_id == 0 && cluster_block_id == 0) {
         printf("================= In Flash Decoding =================\n");
     }
-    cluster.sync();
     if (tid == 0 && head_id == 0) {
         printf("local_max: %f from cluster_block_id: %d\n", local_max, cluster_block_id);
-        printf("local_sum: %f from cluster_block_id: %d\n", local_sum, cluster_block_id);
     }
 #endif
     for (int i = 1; i < cluster.num_blocks() - 1; i++) {
@@ -589,6 +586,15 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     }
     cluster.sync();
     // DSM Ring-All reduce: local_sum
+#ifdef DEBUG
+    // DEBUG PRINT
+    if (tid == 0 && head_id == 0 && cluster_block_id == 0) {
+        printf("================= In Flash Decoding =================\n");
+    }
+    if (tid == 0 && head_id == 0) {
+        printf("local_sum: %f from cluster_block_id: %d\n", local_sum, cluster_block_id);
+    }
+#endif
     for (int i = 1; i < cluster.num_blocks() - 1; i++) {
         if (tid == 0) {
             local_sum = cluster_local_sum;
