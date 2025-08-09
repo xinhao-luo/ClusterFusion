@@ -42,6 +42,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     const __grid_constant__ CUtensorMap tensor_map_weight_gate_up_,// 2 * hidden_dim * ffn_dim
     const __grid_constant__ CUtensorMap tensor_map_weight_down, // ffn_dim * hidden_dim
     const __grid_constant__ CUtensorMap tensor_map_weight_down_ // ffn_dim * hidden_dim
+    // const uint32_t SEQ_LEN, 
+    // const uint32_t KV_DIM_PER_BLOCK
 ) {
     cg::grid_group grid             = cg::this_grid();
     cg::cluster_group cluster       = cg::this_cluster();
@@ -55,11 +57,21 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     const uint32_t tile_col = tid % NUM_THREAD_PER_ROW_2;
 
     // Init shared memory
+    // __shared__ __align__(16) half input_shmem[DIM_PER_BLOCK];
+    // __shared__ float reduction[2 * DIM_BLOCK_REDUCE];
+    // __shared__ alignas(128) half weight[2 * TMA_LOAD_ONCE * MAX_SMEM_DIM];
+    // __shared__ __align__(16) half local_qkv[MAX_SMEM_DIM + MAX_SMEM_DIM + HEAD_DIM];
+    
+    // extern __shared__ uint8_t shmem_base[];
+    // half* input_shmem = reinterpret_cast<half*>(shmem_base);
+    // float* reduction  = reinterpret_cast<float*>(shmem_base + DIM_PER_BLOCK * sizeof(half));
+    // half* weight      = reinterpret_cast<half*>((uintptr_t)(shmem_base + DIM_PER_BLOCK * sizeof(half) + 2 * DIM_BLOCK_REDUCE * sizeof(float)) + 127 & ~127);
+    // half* local_qkv   = reinterpret_cast<half*>((uintptr_t)(weight + 2 * TMA_LOAD_ONCE * MAX_SMEM_DIM) + 127 & ~127);
     extern __shared__ uint8_t shmem_base[];
-    half* input_shmem = reinterpret_cast<half*>(shmem_base);
-    float* reduction  = reinterpret_cast<float*>(shmem_base + DIM_PER_BLOCK * sizeof(half));
-    half* weight      = reinterpret_cast<half*>((uintptr_t)(shmem_base + DIM_PER_BLOCK * sizeof(half) + 2 * DIM_BLOCK_REDUCE * sizeof(float)) + 127 & ~127);
-    half* local_qkv   = reinterpret_cast<half*>((uintptr_t)(weight + 2 * TMA_LOAD_ONCE * MAX_SMEM_DIM) + 127 & ~127);
+    half* input_shmem = reinterpret_cast<half*>(((uintptr_t)shmem_base + 15) & ~uintptr_t(15));
+    float* reduction  = reinterpret_cast<float*>(input_shmem + DIM_PER_BLOCK);
+    half* weight = reinterpret_cast<half*>(((uintptr_t)(reduction + 2 * DIM_BLOCK_REDUCE) + 127) & ~uintptr_t(127));
+    half* local_qkv = reinterpret_cast<half*>(((uintptr_t)(weight + 2 * TMA_LOAD_ONCE * MAX_SMEM_DIM) + 15) & ~uintptr_t(15));
 
     __shared__ float cluster_local_sum, cluster_local_max;
 
