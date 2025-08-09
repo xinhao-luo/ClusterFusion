@@ -86,6 +86,10 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
         print(f"{o[head_id, 0: 8]}")
         print(f"{o[head_id, 120: 128]}")
     o = o_proj(o.view(1, 32 * head_dim))
+    if debug:
+        print("final output o")
+        print(o[0, 0:8])
+        print(o[0, 4088:4096])
     # flashinfer.fused_add_rmsnorm(o, residual, rms_attn_weight, eps)
     # o_ffn = F.relu(gate_proj(o)) * up_proj(o)
     # o = down_proj(o_ffn)
