@@ -454,8 +454,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         reg_reduce[i] = 0.0f;
     local_sum = 0.0, local_max = 0.0;
     #pragma unroll
-    for(int j = 0; j < DIM_BLOCK_REDUCE; j++) {
-        // TODO
+    for(int j = 0; j < DIM_BLOCK_REDUCE / 2; j++) {
         *(uint4*)(&reg_input[0]) = *(uint4*)(&weight[j * HEAD_DIM + tile_col * NUM_PER_THREAD]);
         float m = reduction[j * 2], s = reduction[j * 2 + 1];
         pre_max = local_max;
