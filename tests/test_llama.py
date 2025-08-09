@@ -105,6 +105,7 @@ def generate_random_weights(shape):
     return (torch.randn(shape) * 0.2).to(0).half()
 
 def test_llama_decode_e2e():
+    print(f"seqlen: {seqlen}")
     # Generate random weights
     input_tensor = generate_random_weights((1, hidden_size)).to(0).half()
     weight_qkv = generate_random_weights((3 * hidden_size, num_heads * head_dim)).to(0).half()
