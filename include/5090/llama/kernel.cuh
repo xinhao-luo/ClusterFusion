@@ -653,15 +653,10 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     // DEBUG PRINT
     if (tid == 0 && head_id == 0 && cluster_block_id == 2) {
         printf("================= After Flash Decoding & Cluster Reduce =================\n");
-        printf("\nlocal_qkv[2 * HEAD_DIM: 2 * HEAD_DIM + 8] k_new[120: 128]\n");
-        for (int i = 2 * HEAD_DIM; i < 2 * HEAD_DIM + 8; i++) {
+        printf("\nlocal_qkv[2 * HEAD_DIM: 3 * HEAD_DIM] o[0: 128]\n");
+        for (int i = 2 * HEAD_DIM; i < 3 * HEAD_DIM; i++) {
             printf("%f ", __half2float(local_qkv[i]));
         }
-        printf("\nlocal_qkv[3 * HEAD_DIM - 8: 3 * HEAD_DIM] k_new[120: 128]\n");
-        for (int i = 3 * HEAD_DIM - 8; i < 3 * HEAD_DIM; i++) {
-            printf("%f ", __half2float(local_qkv[i]));
-        }
-        printf("\n");
     }
 #endif
 

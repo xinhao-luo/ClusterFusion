@@ -82,9 +82,8 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
     )
     if debug:
         print("attn output O")
-        print(f"o, head_id = {head_id}: first 8, last 8")
-        print(f"{o[head_id, 0: 8]}")
-        print(f"{o[head_id, 120: 128]}")
+        print(f"o, head_id = {head_id}, o")
+        print(f"{o[head_id, 0: 128]}")
     o = o_proj(o.view(1, 32 * head_dim))
     if debug:
         print("final output o")
