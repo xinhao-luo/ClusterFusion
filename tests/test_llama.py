@@ -15,6 +15,9 @@ ffn_dim_fuse = 12288
 torch.manual_seed(42)
 torch.set_printoptions(precision=4, sci_mode=False)
 
+# Enable Debug print
+debug = False
+
 def initialize_rope_embeddings(HEAD_DIM):
     angles = (torch.rand((1, HEAD_DIM), dtype=torch.float32) * (2 * torch.pi)).to(0)
     h_cos = torch.cos(angles)
@@ -36,6 +39,10 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, cos, sin):
+    # DEBUG PRINT
+    if debug:
+        print("----------------------------- python begin -----------------------------")
+
     residual = torch.zeros(hidden.shape).to(0).half()
     flashinfer.fused_add_rmsnorm(hidden, residual, rms_input_weight, eps)
     residual = hidden
@@ -44,17 +51,49 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
     k_new = qkv_new[1].view(1, 32, head_dim)
     v_new = qkv_new[2].view(1, 32, head_dim)
     head_id = 0
+
+    # DEBUG PRINT
+    if debug: 
+        print("before RoPE")
+        print(f"q, head_id = {head_id}: first 8, last 8")
+        print(f"{q[0, head_id, 0: 8]}")
+        print(f"{q[0, head_id, 120: 128]}")
+        print(f"k_new, head_id = {head_id}: first 8, last 8")
+        print(f"{k_new[0, head_id, 0: 8]}")
+        print(f"{k_new[0, head_id, 120: 128]}")
+
     q, k_new = apply_rotary_pos_emb(q, k_new, cos, sin)  # RoPE need debug
+
+    # DEBUG PRINT
+    if debug: 
+        print("after RoPE")
+        print(f"q, head_id = {head_id}: first 8, last 8")
+        print(f"{q[0, head_id, 0: 8]}")
+        print(f"{q[0, head_id, 120: 128]}")
+        print(f"k_new, head_id = {head_id}: first 8, last 8")
+        print(f"{k_new[0, head_id, 0: 8]}")
+        print(f"{k_new[0, head_id, 120: 128]}")
+
     q = q.reshape(32, head_dim)
     k = torch.cat((kv_cache[0], k_new), dim=0) 
     v = torch.cat((kv_cache[1], v_new), dim=0)
     o = flashinfer.single_decode_with_kv_cache(
         q, k, v, "NHD", "NONE", use_tensor_cores=False
     )
+    if debug:
+        print("attn output O")
+        print(f"o, head_id = {head_id}, o")
+        print(f"{o[head_id, 0: 128]}")
     o = o_proj(o.view(1, 32 * head_dim))
+    if debug:
+        print("final output o")
+        print(o[0, 0:8])
+        print(o[0, 4088:4096])
     # flashinfer.fused_add_rmsnorm(o, residual, rms_attn_weight, eps)
     # o_ffn = F.relu(gate_proj(o)) * up_proj(o)
     # o = down_proj(o_ffn)
+    if debug:
+        print("-----------------------------  python end  -----------------------------")
     return o.detach()
 
 # without ' * 0.1', the outputs of tilefusion and python both will be 'nan'
@@ -89,7 +128,10 @@ def test_llama_decode_e2e():
     cos, sin = initialize_rope_embeddings(head_dim)
     # Our kernel
     o = []
-    test_run = 10000
+    if debug:
+        test_run = 1
+    else:
+        test_run = 10000
     for i in range(test_run):
         o.append(llama_decoder_layer(
             input_tensor,          
