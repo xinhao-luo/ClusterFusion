@@ -7,6 +7,9 @@ int main(int argc, char** argv) {
     cudaFuncSetAttribute(LlamaDecoderLayerKernel, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
     uint32_t max_shmem_size = (2 * TMA_LOAD_ONCE * MAX_SMEM_DIM + DIM_PER_BLOCK + 3 * HEAD_DIM) * sizeof(half) + 2 * DIM_BLOCK_REDUCE * sizeof(float);
     cudaFuncSetAttribute(LlamaDecoderLayerKernel, cudaFuncAttributeMaxDynamicSharedMemorySize, max_shmem_size);
+
+    const uint32_t SEQ_LEN = 4096;
+    const uint32_t KV_DIM_PER_BLOCK = SEQ_LEN / CLUSTER_SIZE;
     
     // Init input
     half *h_input, *d_input;
@@ -261,7 +264,6 @@ int main(int argc, char** argv) {
         LlamaDecoderLayerKernel<<<grid, block, max_shmem_size>>>(
             d_output,
             d_input,
-            global_reduce,
             d_rms_input,
             d_rms_attn,
             d_cos,
@@ -269,7 +271,9 @@ int main(int argc, char** argv) {
             tensor_map_weight,
             tensor_map_k_cache,
             tensor_map_v_cache,
-            tensor_map_weight_o
+            tensor_map_weight_o,
+            SEQ_LEN,
+            KV_DIM_PER_BLOCK
         );
     }
     cudaError_t err = cudaGetLastError();
@@ -286,7 +290,6 @@ int main(int argc, char** argv) {
         LlamaDecoderLayerKernel<<<grid, block, max_shmem_size>>>(
             d_output,
             d_input,
-            global_reduce,
             d_rms_input,
             d_rms_attn,
             d_cos,
@@ -294,7 +297,9 @@ int main(int argc, char** argv) {
             tensor_map_weight,
             tensor_map_k_cache,
             tensor_map_v_cache,
-            tensor_map_weight_o
+            tensor_map_weight_o,
+            SEQ_LEN,
+            KV_DIM_PER_BLOCK
         );
     }
     cudaEventRecord(ed);

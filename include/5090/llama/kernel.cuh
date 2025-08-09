@@ -43,7 +43,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     const uint32_t tile_col = tid % NUM_THREAD_PER_ROW_2;
 #ifdef DEBUG
     if (tid == 0 && head_id == PRINT_HEAD && cluster_block_id == 2) {
-        printf("PRINT_HEAD: %d", PRINT_HEAD);
+        printf("PRINT_HEAD: %d\n", PRINT_HEAD);
     }
 #endif
 

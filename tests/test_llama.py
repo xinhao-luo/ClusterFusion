@@ -16,7 +16,7 @@ torch.manual_seed(42)
 torch.set_printoptions(precision=4, sci_mode=False)
 
 # Enable Debug print
-debug = False
+debug = 0
 print_head = 0
 if debug:
     test_run = 1
