@@ -16,7 +16,7 @@ torch.manual_seed(42)
 torch.set_printoptions(precision=4, sci_mode=False)
 
 # Enable Debug print
-debug = True
+debug = False
 
 def initialize_rope_embeddings(HEAD_DIM):
     angles = (torch.rand((1, HEAD_DIM), dtype=torch.float32) * (2 * torch.pi)).to(0)
@@ -217,7 +217,7 @@ def test_llama_decode_e2e():
     print(f"Max Error in MAE of {test_run} runs", max(mae_list).item())
     print(f"Max Error in MSE of {test_run} runs", max(mse_list).item())
     print(f"Max Error in Max Errors of {test_run} runs", max(max_error_list).item())
-    print(f"Count of Max Errors > 1: {sum(e.item() > 1 for e in max_error_list)}")
+    print(f"Count of Max Errors > 0.1: {sum(e.item() > 0.1 for e in max_error_list)}")
 
 if __name__ == "__main__":
     test_llama_decode_e2e()
