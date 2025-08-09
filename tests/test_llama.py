@@ -93,7 +93,8 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
     # flashinfer.fused_add_rmsnorm(o, residual, rms_attn_weight, eps)
     # o_ffn = F.relu(gate_proj(o)) * up_proj(o)
     # o = down_proj(o_ffn)
-    print("-----------------------------  python end  -----------------------------")
+    if debug:
+        print("-----------------------------  python end  -----------------------------")
     return o.detach()
 
 # without ' * 0.1', the outputs of tilefusion and python both will be 'nan'

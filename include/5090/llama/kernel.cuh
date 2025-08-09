@@ -470,14 +470,14 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
             }
         }
     }
-    bar[1].wait(std::move(token[1]));
+    bar[(KV_DIM_PER_BLOCK / TMA_LOAD_ONCE_ATTN - 1) % 2].wait(std::move(token[(KV_DIM_PER_BLOCK / TMA_LOAD_ONCE_ATTN - 1) % 2]));
     pre_max = local_max;
     #pragma unroll
     for (int j = 0; j < DEC_TILE; j++) {
         if (cluster_block_id == CLUSTER_SIZE - 1 && warp_id == NUM_WARPS - 1 && lane_id / NUM_THREAD_PER_ROW_2 == 1 && j == DEC_TILE - 1)
             *(uint4*)(&reg_weight[0]) = *(uint4*)(&local_qkv[HEAD_DIM + input_idx_2]);
         else
-            *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight[TMA_LOAD_ONCE_NUM + (weight_idx_2 + j) * HEAD_DIM + input_idx_2]);
+            *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight[((KV_DIM_PER_BLOCK / TMA_LOAD_ONCE_ATTN - 1) % 2) * TMA_LOAD_ONCE_NUM + (weight_idx_2 + j) * HEAD_DIM + input_idx_2]);
         qk[j] = 0.0f;
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
@@ -503,12 +503,12 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         // reg_reduce[j] = __hmul(reg_reduce[j], __float2half(scale));
         reg_reduce[j] = reg_reduce[j] * scale;
     }
-    bar[3].wait(std::move(token[3]));
+    bar[(KV_DIM_PER_BLOCK / TMA_LOAD_ONCE_ATTN - 1) % 2 + 2].wait(std::move(token[(KV_DIM_PER_BLOCK / TMA_LOAD_ONCE_ATTN - 1) % 2 + 2]));
     for (int j = 0; j < DEC_TILE; j++) {
         if (cluster_block_id == CLUSTER_SIZE - 1 && warp_id == NUM_WARPS - 1 && lane_id / NUM_THREAD_PER_ROW_2 == 1 && j == DEC_TILE - 1) 
             *(uint4*)(&reg_weight[0]) = *(uint4*)(&local_qkv[2 * HEAD_DIM + input_idx_2]);
         else
-            *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight[TMA_LOAD_ONCE_NUM + TMA_LOAD_ONCE_NUM_ATTN + (weight_idx_2 + j) * HEAD_DIM + input_idx_2]);
+            *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight[((KV_DIM_PER_BLOCK / TMA_LOAD_ONCE_ATTN - 1) % 2) * TMA_LOAD_ONCE_NUM + TMA_LOAD_ONCE_NUM_ATTN + (weight_idx_2 + j) * HEAD_DIM + input_idx_2]);
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
             // reg_reduce[d] = __hadd(reg_reduce[d], __float2half(qk[j] * __half2float(reg_weight[d])));
@@ -554,6 +554,17 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     }
     cluster.sync();
     // DSM Ring All-reduce: local_max
+#ifdef DEBUG
+    // DEBUG PRINT
+    if (tid == 0 && head_id == 0 && cluster_block_id == 0) {
+        printf("================= In Flash Decoding =================\n");
+    }
+    cluster.sync();
+    if (tid == 0 && head_id == 0) {
+        printf("local_max: %f from cluster_block_id: %d\n", local_max, cluster_block_id);
+        printf("local_sum: %f from cluster_block_id: %d\n", local_sum, cluster_block_id);
+    }
+#endif
     for (int i = 1; i < cluster.num_blocks() - 1; i++) {
         if (tid == 0) {
             local_max = cluster_local_max;
@@ -609,6 +620,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     // DEBUG PRINT
     if (tid == 0 && head_id == 0 && cluster_block_id == 2) {
         printf("================= After Flash Decoding, Before Cluster Reduce =================\n");
+        printf("cluster_local_max: %f \n", cluster_local_max);
+        printf("cluster_local_sum: %f \n", cluster_local_sum);
         printf("\nlocal_qkv[2 * HEAD_DIM: 2 * HEAD_DIM + 8] k_new[120: 128]\n");
         for (int i = 2 * HEAD_DIM; i < 2 * HEAD_DIM + 8; i++) {
             printf("%f ", __half2float(local_qkv[i]));
