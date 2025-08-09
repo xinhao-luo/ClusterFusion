@@ -6,6 +6,8 @@ using barrier = cuda::barrier<cuda::thread_scope_block>;
 namespace cde = cuda::device::experimental;
 namespace cg = cooperative_groups;
 
+#define DEBUG
+
 __forceinline__ __device__ float ptx_exp2(float x) {
   float y;
   asm volatile("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
@@ -273,6 +275,30 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     }
     block.sync();
 
+#ifdef DEBUG
+    // DEBUG PRINT
+    if (tid == 0 && head_id == 0 && cluster_block_id == 2) {
+        printf("================= Before Cluster Reduce =================\n");
+        printf("local_qkv[0: 8] (q[0:8])\n");
+        for (int i = 0; i < 8; i++) {
+            printf("%f ", __half2float(local_qkv[i]));
+        }
+        printf("\nlocal_qkv[120: 128] (q[120:128])\n");
+        for (int i = 120; i < 128; i++) {
+            printf("%f ", __half2float(local_qkv[i]));
+        }
+        printf("\nlocal_qkv[HEAD_DIM: HEAD_DIM + 8] k_new[0: 8]\n");
+        for (int i = HEAD_DIM; i < HEAD_DIM + 8; i++) {
+            printf("%f ", __half2float(local_qkv[i]));
+        }
+        printf("\nlocal_qkv[2 * HEAD_DIM - 8: 2 * HEAD_DIM] k_new[120: 128]\n");
+        for (int i = 2 * HEAD_DIM - 8; i < 2 * HEAD_DIM; i++) {
+            printf("%f ", __half2float(local_qkv[i]));
+        }
+        printf("\n");
+    }
+#endif
+
     // DSM Ring All-reduce
     size = (HEAD_DIM * 3) * sizeof(half);
     src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_qkv));
@@ -281,6 +307,30 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         size, tid, HEAD_DIM, cluster_block_id,  
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, local_qkv, weight);
+
+#ifdef DEBUG
+    // DEBUG PRINT
+    if (tid == 0 && head_id == 0 && cluster_block_id == 2) {
+        printf("================= After Cluster Reduce =================\n");
+        printf("local_qkv[0: 8] (q[0:8])\n");
+        for (int i = 0; i < 8; i++) {
+            printf("%f ", __half2float(local_qkv[i]));
+        }
+        printf("\nlocal_qkv[120: 128] (q[120:128])\n");
+        for (int i = 120; i < 128; i++) {
+            printf("%f ", __half2float(local_qkv[i]));
+        }
+        printf("\nlocal_qkv[HEAD_DIM: HEAD_DIM + 8] k_new[0: 8]\n");
+        for (int i = HEAD_DIM; i < HEAD_DIM + 8; i++) {
+            printf("%f ", __half2float(local_qkv[i]));
+        }
+        printf("\nlocal_qkv[2 * HEAD_DIM - 8: 2 * HEAD_DIM] k_new[120: 128]\n");
+        for (int i = 2 * HEAD_DIM - 8; i < 2 * HEAD_DIM; i++) {
+            printf("%f ", __half2float(local_qkv[i]));
+        }
+        printf("\n");
+    }
+#endif
 
     // Compute RoPE
     // if (tid < HEAD_DIM / 2) {
@@ -304,6 +354,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         // }
     // }
 
+
     q_rope = __half2float(local_qkv[tid]);
     k_rope = __half2float(local_qkv[HEAD_DIM + tid]);
     cos_reg = cos[tid];
@@ -323,6 +374,30 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         local_qkv[tid] = __float2half(q_rope * cos_reg + q_rope_1 * sin_reg);
         local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg + k_rope_1 * sin_reg);
     }
+
+#ifdef DEBUG
+    // DEBUG PRINT
+    if (tid == 0 && head_id == 0 && cluster_block_id == 2) {
+        printf("================= After RoPE =================\n");
+        printf("local_qkv[0: 8] (q[0:8])\n");
+        for (int i = 0; i < 8; i++) {
+            printf("%f ", __half2float(local_qkv[i]));
+        }
+        printf("\nlocal_qkv[120: 128] (q[120:128])\n");
+        for (int i = 120; i < 128; i++) {
+            printf("%f ", __half2float(local_qkv[i]));
+        }
+        printf("\nlocal_qkv[HEAD_DIM: HEAD_DIM + 8] k_new[0: 8]\n");
+        for (int i = HEAD_DIM; i < HEAD_DIM + 8; i++) {
+            printf("%f ", __half2float(local_qkv[i]));
+        }
+        printf("\nlocal_qkv[2 * HEAD_DIM - 8: 2 * HEAD_DIM] k_new[120: 128]\n");
+        for (int i = 2 * HEAD_DIM - 8; i < 2 * HEAD_DIM; i++) {
+            printf("%f ", __half2float(local_qkv[i]));
+        }
+        printf("\n");
+    }
+#endif
 
     // Compute flash-decoding
     local_sum = 0.0f;
@@ -538,6 +613,22 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         size, tid, HEAD_DIM, cluster_block_id,  
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, &local_qkv[2 * HEAD_DIM], weight);
+
+#ifdef DEBUG
+    // DEBUG PRINT
+    if (tid == 0 && head_id == 0 && cluster_block_id == 2) {
+        printf("================= After Flash Decoding =================\n");
+        printf("\nlocal_qkv[2 * HEAD_DIM: 2 * HEAD_DIM + 8] k_new[120: 128]\n");
+        for (int i = 2 * HEAD_DIM; i < 2 * HEAD_DIM + 8; i++) {
+            printf("%f ", __half2float(local_qkv[i]));
+        }
+        printf("\nlocal_qkv[3 * HEAD_DIM - 8: 3 * HEAD_DIM] k_new[120: 128]\n");
+        for (int i = 3 * HEAD_DIM - 8; i < 3 * HEAD_DIM; i++) {
+            printf("%f ", __half2float(local_qkv[i]));
+        }
+        printf("\n");
+    }
+#endif
 
     // Compute output @ w_o
     // Preload w_o
