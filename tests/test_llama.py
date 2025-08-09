@@ -17,6 +17,10 @@ torch.set_printoptions(precision=4, sci_mode=False)
 
 # Enable Debug print
 debug = False
+if debug:
+    test_run = 1
+else:
+    test_run = 10000
 
 def initialize_rope_embeddings(HEAD_DIM):
     angles = (torch.rand((1, HEAD_DIM), dtype=torch.float32) * (2 * torch.pi)).to(0)
@@ -128,10 +132,6 @@ def test_llama_decode_e2e():
     cos, sin = initialize_rope_embeddings(head_dim)
     # Our kernel
     o = []
-    if debug:
-        test_run = 1
-    else:
-        test_run = 10000
     for i in range(test_run):
         o.append(llama_decoder_layer(
             input_tensor,          
