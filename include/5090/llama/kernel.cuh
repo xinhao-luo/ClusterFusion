@@ -678,10 +678,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 #endif
 
     // Compute output @ w_o
-    for (int i = 0; i < DIM_PER_BLOCK / BLOCK_SIZE; i++) {
-        input_shmem[tid * DIM_PER_BLOCK / BLOCK_SIZE + i] = __float2half(0.0f);
-    }
-    cluster.sync();
     // Preload w_o
     if (tid == 0) {
         cde::cp_async_bulk_tensor_2d_global_to_shared(&weight[0], &tensor_map_weight_o, cluster_block_st_id, cluster_head_idx, bar[0]);
@@ -713,7 +709,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         }
         if (lane_id % NUM_THREAD_PER_ROW_3 == 0) {
             // atomicAdd(&output[cluster_block_st_id + weight_idx_3 + (id - 1) * TMA_LOAD_ONCE], __float2half(tmp));
-            atomicAdd(&input_shmem[weight_idx_3 + (id - 1) * TMA_LOAD_ONCE], __float2half(tmp));
+            input_shmem[weight_idx_3 + (id - 1) * TMA_LOAD_ONCE] = __float2half(tmp);
         }
         block.sync();
     }
@@ -733,7 +729,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     }
     if (lane_id % NUM_THREAD_PER_ROW_3 == 0) {
         // atomicAdd(&output[cluster_block_st_id + weight_idx_3 + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE], __float2half(tmp));
-        atomicAdd(&input_shmem[weight_idx_3 + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE], __float2half(tmp));
+        input_shmem[weight_idx_3 + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE] = __float2half(tmp);
     }
     block.sync();
     for (int i = 0; i < DIM_PER_BLOCK / BLOCK_SIZE; i++) {
