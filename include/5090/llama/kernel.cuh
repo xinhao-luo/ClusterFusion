@@ -7,6 +7,9 @@ namespace cde = cuda::device::experimental;
 namespace cg = cooperative_groups;
 
 // #define DEBUG
+#ifdef DEBUG
+#define PRINT_HEAD 0
+#endif
 
 __forceinline__ __device__ float ptx_exp2(float x) {
   float y;
@@ -39,7 +42,9 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     const uint32_t tile_row = tid / NUM_THREAD_PER_ROW_2;
     const uint32_t tile_col = tid % NUM_THREAD_PER_ROW_2;
 #ifdef DEBUG
-    const uint32_t PRINT_HEAD = 1;
+    if (tid == 0 && head_id == PRINT_HEAD && cluster_block_id == 2) {
+        printf("PRINT_HEAD: %d", PRINT_HEAD);
+    }
 #endif
 
     // Init shared memory

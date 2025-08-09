@@ -16,7 +16,8 @@ torch.manual_seed(42)
 torch.set_printoptions(precision=4, sci_mode=False)
 
 # Enable Debug print
-debug = False 
+debug = False
+print_head = 0
 if debug:
     test_run = 1
 else:
@@ -54,29 +55,28 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
     q = qkv_new[0].view(1, 32, head_dim)
     k_new = qkv_new[1].view(1, 32, head_dim)
     v_new = qkv_new[2].view(1, 32, head_dim)
-    head_id = 0
 
     # DEBUG PRINT
     if debug: 
         print("before RoPE")
-        print(f"q, head_id = {head_id}: first 8, last 8")
-        print(f"{q[0, head_id, 0: 8]}")
-        print(f"{q[0, head_id, 120: 128]}")
-        print(f"k_new, head_id = {head_id}: first 8, last 8")
-        print(f"{k_new[0, head_id, 0: 8]}")
-        print(f"{k_new[0, head_id, 120: 128]}")
+        print(f"q, head_id = {print_head}: first 8, last 8")
+        print(f"{q[0, print_head, 0: 8]}")
+        print(f"{q[0, print_head, 120: 128]}")
+        print(f"k_new, head_id = {print_head}: first 8, last 8")
+        print(f"{k_new[0, print_head, 0: 8]}")
+        print(f"{k_new[0, print_head, 120: 128]}")
 
     q, k_new = apply_rotary_pos_emb(q, k_new, cos, sin)  # RoPE need debug
 
     # DEBUG PRINT
     if debug: 
         print("after RoPE")
-        print(f"q, head_id = {head_id}: first 8, last 8")
-        print(f"{q[0, head_id, 0: 8]}")
-        print(f"{q[0, head_id, 120: 128]}")
-        print(f"k_new, head_id = {head_id}: first 8, last 8")
-        print(f"{k_new[0, head_id, 0: 8]}")
-        print(f"{k_new[0, head_id, 120: 128]}")
+        print(f"q, head_id = {print_head}: first 8, last 8")
+        print(f"{q[0, print_head, 0: 8]}")
+        print(f"{q[0, print_head, 120: 128]}")
+        print(f"k_new, head_id = {print_head}: first 8, last 8")
+        print(f"{k_new[0, print_head, 0: 8]}")
+        print(f"{k_new[0, print_head, 120: 128]}")
 
     q = q.reshape(32, head_dim)
     k = torch.cat((kv_cache[0], k_new), dim=0) 
@@ -86,8 +86,8 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
     )
     if debug:
         print("attn output O")
-        print(f"o, head_id = {head_id}, o")
-        print(f"{o[head_id, 0: 128]}")
+        print(f"o, head_id = {print_head}, o")
+        print(f"{o[print_head, 0: 128]}")
     o = o_proj(o.view(1, 32 * head_dim))
     if debug:
         print("final output o")
