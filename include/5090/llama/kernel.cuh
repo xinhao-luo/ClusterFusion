@@ -38,6 +38,9 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     const uint32_t warp_id = tid / WARP_SIZE;
     const uint32_t tile_row = tid / NUM_THREAD_PER_ROW_2;
     const uint32_t tile_col = tid % NUM_THREAD_PER_ROW_2;
+#ifdef DEBUG
+    const uint32_t PRINT_HEAD = 1;
+#endif
 
     // Init shared memory
     // __shared__ __align__(16) half input_shmem[DIM_PER_BLOCK];
@@ -277,7 +280,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 
 #ifdef DEBUG
     // DEBUG PRINT
-    if (tid == 0 && head_id == 0 && cluster_block_id == 2) {
+    if (tid == 0 && (head_id == PRINT_HEAD) && cluster_block_id == 2) {
         printf("================= Before Cluster Reduce =================\n");
         printf("local_qkv[0: 8] (q[0:8])\n");
         for (int i = 0; i < 8; i++) {
@@ -310,7 +313,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 
 #ifdef DEBUG
     // DEBUG PRINT
-    if (tid == 0 && head_id == 0 && cluster_block_id == 2) {
+    if (tid == 0 && (head_id == PRINT_HEAD) && cluster_block_id == 2) {
         printf("================= After Cluster Reduce =================\n");
         printf("local_qkv[0: 8] (q[0:8])\n");
         for (int i = 0; i < 8; i++) {
@@ -377,7 +380,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 
 #ifdef DEBUG
     // DEBUG PRINT
-    if (tid == 0 && head_id == 0 && cluster_block_id == 2) {
+    if (tid == 0 && head_id == PRINT_HEAD && cluster_block_id == 2) {
         printf("================= After RoPE =================\n");
         printf("local_qkv[0: 8] (q[0:8])\n");
         for (int i = 0; i < 8; i++) {
@@ -555,10 +558,10 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     // DSM Ring All-reduce: local_max
 #ifdef DEBUG
     // DEBUG PRINT
-    if (tid == 0 && head_id == 0 && cluster_block_id == 0) {
+    if (tid == 0 && (head_id == PRINT_HEAD) && cluster_block_id == 0) {
         printf("================= In Flash Decoding =================\n");
     }
-    if (tid == 0 && head_id == 0) {
+    if (tid == 0 && (head_id == PRINT_HEAD)) {
         printf("local_max: %f from cluster_block_id: %d\n", local_max, cluster_block_id);
     }
 #endif
@@ -588,10 +591,10 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     // DSM Ring-All reduce: local_sum
 #ifdef DEBUG
     // DEBUG PRINT
-    if (tid == 0 && head_id == 0 && cluster_block_id == 0) {
+    if (tid == 0 && (head_id == PRINT_HEAD) && cluster_block_id == 0) {
         printf("================= In Flash Decoding =================\n");
     }
-    if (tid == 0 && head_id == 0) {
+    if (tid == 0 && (head_id == PRINT_HEAD)) {
         printf("local_sum: %f from cluster_block_id: %d\n", local_sum, cluster_block_id);
     }
 #endif
@@ -624,7 +627,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 
 #ifdef DEBUG
     // DEBUG PRINT
-    if (tid == 0 && head_id == 0 && cluster_block_id == 2) {
+    if (tid == 0 && (head_id == PRINT_HEAD) && cluster_block_id == 2) {
         printf("================= After Flash Decoding, Before Cluster Reduce =================\n");
         printf("cluster_local_max: %f \n", cluster_local_max);
         printf("cluster_local_sum: %f \n", cluster_local_sum);
@@ -651,7 +654,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 
 #ifdef DEBUG
     // DEBUG PRINT
-    if (tid == 0 && head_id == 0 && cluster_block_id == 2) {
+    if (tid == 0 && (head_id == PRINT_HEAD) && cluster_block_id == 2) {
         printf("================= After Flash Decoding & Cluster Reduce =================\n");
         printf("\nlocal_qkv[2 * HEAD_DIM: 3 * HEAD_DIM] o[0: 128]\n");
         for (int i = 2 * HEAD_DIM; i < 3 * HEAD_DIM; i++) {
@@ -715,7 +718,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 
 #ifdef DEBUG
     // DEBUG PRINT
-    if (tid == 0 && head_id == 0 && cluster_block_id == 2) {
+    if (tid == 0 && (head_id == PRINT_HEAD) && cluster_block_id == 2) {
         printf("================= After O_proj(attn output) =================\n");
         printf("\noutput[0: 8]\n");
         for (int i = 0; i < 8; i++) {
