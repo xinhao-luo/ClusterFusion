@@ -36,16 +36,12 @@ torch::Tensor llama_decoder_layer_sm120(
     float* sin_ptr = reinterpret_cast<float*>(sin.data_ptr<float>());
 
     const uint32_t SEQ_LEN = k_cache.size(0);
-    const uint32_t KV_DIM_PER_BLOCK = SEQ_LEN / CLUSTER_SIZE;
+    const uint32_t KV_DIM_PER_BLOCK = ((SEQ_LEN + CLUSTER_SIZE - 1) / CLUSTER_SIZE + (TMA_LOAD_ONCE_ATTN - 1)) & ~(TMA_LOAD_ONCE_ATTN - 1);
     
     CUtensorMap tensor_map_weight{};
     CUtensorMap tensor_map_k_cache{};
     CUtensorMap tensor_map_v_cache{};
     CUtensorMap tensor_map_weight_o{};
-    CUtensorMap tensor_map_weight_gate_up{};
-    CUtensorMap tensor_map_weight_gate_up_{};
-    CUtensorMap tensor_map_weight_down{};
-    CUtensorMap tensor_map_weight_down_{};
     
     constexpr uint32_t rank = 2;
     uint64_t size[rank] = {HIDDEN_DIM, 3 * HIDDEN_DIM};
@@ -121,25 +117,6 @@ torch::Tensor llama_decoder_layer_sm120(
         stride_weight_o,                     
         box_size_weight_o,                   
         elem_stride_weight_o,                
-        CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-        CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
-        CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
-        CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
-    );
-
-    uint64_t size_weight_gate_up[rank] = {FFN_DIM, 2 * HIDDEN_DIM};
-    uint64_t stride_weight_gate_up[rank - 1] = {FFN_DIM * sizeof(half)};
-    uint32_t box_size_weight_gate_up[rank] = {TMA_LOAD_ONCE_MAX, TMA_LOAD_ONCE};
-    uint32_t elem_stride_weight_gate_up[rank] = {1, 1};
-    CUresult res_weight_gate_up = cuTensorMapEncodeTiled(
-        &tensor_map_weight_gate_up,                
-        CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_FLOAT16,
-        rank,                       
-        gate_up_proj_weight_ptr,                 
-        size_weight_gate_up,                       
-        stride_weight_gate_up,                     
-        box_size_weight_gate_up,                   
-        elem_stride_weight_gate_up,                
         CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
         CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
         CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
