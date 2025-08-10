@@ -7,7 +7,7 @@ from clusterfusion import llama_decoder_layer
 
 hidden_size = 4096
 num_heads = 32
-seqlen = 4096
+seqlen = 233
 head_dim = hidden_size // num_heads
 ffn_dim_gt = 11008  
 ffn_dim_fuse = 12288    
@@ -17,7 +17,7 @@ torch.set_printoptions(precision=4, sci_mode=False)
 
 # Enable Debug print
 debug = 0
-print_head = 0
+print_head = 1
 if debug:
     test_run = 1
 else:

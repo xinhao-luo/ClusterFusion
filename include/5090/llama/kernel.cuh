@@ -8,7 +8,7 @@ namespace cg = cooperative_groups;
 
 // #define DEBUG
 #ifdef DEBUG
-#define PRINT_HEAD 0
+#define PRINT_HEAD 1
 #endif
 
 __forceinline__ __device__ float ptx_exp2(float x) {
@@ -452,10 +452,13 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         }
         scale = ptx_exp2(pre_max - local_max);
         local_sum *= scale;
+        // For filled zeros
         #pragma unroll
         for (int j = 0; j < DEC_TILE; j++) {
-            qk[j] = ptx_exp2(qk[j] - local_max);
-            local_sum += qk[j];
+            if ((KV_DIM_PER_BLOCK * cluster_block_id + (id - 1) * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) < (SEQ_LEN + 1)) {
+                qk[j] = ptx_exp2(qk[j] - local_max);
+                local_sum += qk[j];
+            }
         }
         #pragma unroll
         for (int j = 0; j < NUM_PER_THREAD; j++) {
@@ -504,8 +507,10 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     local_sum *= scale;
     #pragma unroll
     for (int j = 0; j < DEC_TILE; j++) {
-        qk[j] = ptx_exp2(qk[j] - local_max);
-        local_sum += qk[j];
+        if ((KV_DIM_PER_BLOCK * cluster_block_id + (KV_DIM_PER_BLOCK / TMA_LOAD_ONCE_ATTN - 1) * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) < (SEQ_LEN + 1)) {
+            qk[j] = ptx_exp2(qk[j] - local_max);
+            local_sum += qk[j];
+        }
     }
     #pragma unroll
     for (int j = 0; j < NUM_PER_THREAD; j++) {
@@ -528,7 +533,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     block.sync();
 
     // Process KV of current token
-    if (cluster_block_id == CLUSTER_SIZE - 1 && warp_id == NUM_WARPS - 1) {
+    if (cluster_block_id == 0 && warp_id == 0) {
         if (lane_id / NUM_THREAD_PER_ROW_2 == 1) {
             pre_max = local_max;
             *(uint4*)(&reg_weight[0]) = *(uint4*)(&local_qkv[HEAD_DIM + input_idx_2]); 
