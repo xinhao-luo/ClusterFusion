@@ -33,9 +33,16 @@ def initialize_rope_embeddings(HEAD_DIM):
 def apply_rotary_pos_emb(q, k, cos, sin):
     cos = cos.unsqueeze(1)
     sin = sin.unsqueeze(1)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
+    q_embed = (q * cos) + (rotate_every_two(q) * sin)
+    k_embed = (k * cos) + (rotate_every_two(k) * sin)
     return q_embed.to(q.dtype), k_embed.to(k.dtype)
+
+# from llama/model.py
+def rotate_every_two(x):
+    # 相邻两维成对旋转，匹配 view_as_complex(..., 2) 的语义
+    x_even = x[..., ::2]
+    x_odd  = x[..., 1::2]
+    return torch.stack((-x_odd, x_even), dim=-1).reshape_as(x)
 
 # import from llama.py
 def rotate_half(x):

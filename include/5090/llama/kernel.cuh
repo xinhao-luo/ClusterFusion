@@ -367,21 +367,34 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     k_rope = __half2float(local_qkv[HEAD_DIM + tid]);
     cos_reg = cos[tid];
     sin_reg = sin[tid];
-    if (tid < HEAD_DIM / 2) {
-        q_rope_1 = __half2float(local_qkv[HEAD_DIM / 2 + tid]);
-        k_rope_1 = __half2float(local_qkv[HEAD_DIM + HEAD_DIM / 2 + tid]);
-    } else {
-        q_rope_1 = __half2float(local_qkv[tid - HEAD_DIM / 2]);
-        k_rope_1 = __half2float(local_qkv[HEAD_DIM + tid - HEAD_DIM / 2]);
-    }
+    // NOTE: Original RoPE
+    // if (tid < HEAD_DIM / 2) {
+        // q_rope_1 = __half2float(local_qkv[HEAD_DIM / 2 + tid]);
+        // k_rope_1 = __half2float(local_qkv[HEAD_DIM + HEAD_DIM / 2 + tid]);
+    // } else {
+        // q_rope_1 = __half2float(local_qkv[tid - HEAD_DIM / 2]);
+        // k_rope_1 = __half2float(local_qkv[HEAD_DIM + tid - HEAD_DIM / 2]);
+    // }
+    // block.sync();
+    // if (tid < HEAD_DIM / 2) {
+        // local_qkv[tid] = __float2half(q_rope * cos_reg - q_rope_1 * sin_reg);
+        // local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg - k_rope_1 * sin_reg);
+    // } else {
+        // local_qkv[tid] = __float2half(q_rope * cos_reg + q_rope_1 * sin_reg);
+        // local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg + k_rope_1 * sin_reg);
+    // }
+    // NOTE: RoPE from llama/model.py
+    q_rope_1 = __half2float(local_qkv[tid ^ 1]);
+    k_rope_1 = __half2float(local_qkv[HEAD_DIM + (tid ^ 1)]);
     block.sync();
-    if (tid < HEAD_DIM / 2) {
+    if (tid % 2 == 0) {
         local_qkv[tid] = __float2half(q_rope * cos_reg - q_rope_1 * sin_reg);
         local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg - k_rope_1 * sin_reg);
     } else {
         local_qkv[tid] = __float2half(q_rope * cos_reg + q_rope_1 * sin_reg);
         local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg + k_rope_1 * sin_reg);
     }
+
 
 #ifdef DEBUG
     // DEBUG PRINT
