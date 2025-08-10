@@ -16,10 +16,10 @@ torch.manual_seed(42)
 torch.set_printoptions(precision=4, sci_mode=False)
 
 # Enable Debug print
-debug = 0
+debug = 1
 print_head = 1
 if debug:
-    test_run = 1
+    test_run = 10
 else:
     test_run = 10000
 
@@ -95,7 +95,8 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
         print("attn output O")
         print(f"o, head_id = {print_head}, o")
         print(f"{o[print_head, 0: 128]}")
-    o = o_proj(o.view(1, 32 * head_dim))
+    # o = o_proj(o.view(1, 32 * head_dim))
+    o = o.view(1, 32 * head_dim)
     if debug:
         print("final output o")
         print(o[0, 0:8])
@@ -210,22 +211,27 @@ def test_llama_decode_e2e():
     mse_list = []
     mae_list = []
     for i in range(test_run):
-        mae = (o[i] - o_gt).abs().mean()
+        diff = (o[i] - o_gt).abs()
+        mae = diff.mean()
         mae_list.append(mae)
-        # print("Mean Absolute Error (MAE):", mae.item())
 
-        mse = ((o[i] - o_gt) ** 2).mean()
+        mse = (diff ** 2).mean()
         mse_list.append(mse)
-        # print("Mean Squared Error (MSE):", mse.item())
 
-        max_error = (o[i] - o_gt).abs().max()
+        max_error = diff.max()
         max_error_list.append(max_error)
-        # print("Max Error:", max_error.item())
+
+        max_error_pos = torch.argmax(diff).item()
+        print(f"Run {i}: Max Error {max_error.item()} at position {max_error_pos}")
 
     print(f"Max Error in MAE of {test_run} runs", max(mae_list).item())
     print(f"Max Error in MSE of {test_run} runs", max(mse_list).item())
     print(f"Max Error in Max Errors of {test_run} runs", max(max_error_list).item())
     print(f"Count of Max Errors > 0.1: {sum(e.item() > 0.1 for e in max_error_list)}")
+
+    max_error_value = max(max_error_list).item()
+    max_error_index = max_error_list.index(max(max_error_list))
+    print(f"Max Error occurs at run {max_error_index}, value: {max_error_value}")
 
 if __name__ == "__main__":
     test_llama_decode_e2e()
