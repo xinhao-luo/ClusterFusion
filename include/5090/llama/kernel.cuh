@@ -785,20 +785,4 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     // for (int i = 0; i < DIM_PER_BLOCK / BLOCK_SIZE; i++) {
         // atomicAdd(&output[cluster_block_st_id + tid * DIM_PER_BLOCK / BLOCK_SIZE + i], input_shmem[tid * DIM_PER_BLOCK / BLOCK_SIZE + i]);
     // }
-
-#ifdef DEBUG
-    // DEBUG PRINT
-    if (tid == 0 && (head_id == PRINT_HEAD) && cluster_block_id == 2) {
-        printf("================= After O_proj(attn output) =================\n");
-        printf("\noutput[0: 8]\n");
-        for (int i = 0; i < 8; i++) {
-            printf("%f ", __half2float(output[i]));
-        }
-        printf("\noutput[4088: 4096]\n");
-        for (int i = 4088; i < 4096; i++) {
-            printf("%f ", __half2float(output[i]));
-        }
-        printf("\n");
-    }
-#endif
 }
