@@ -18,7 +18,7 @@ __forceinline__ __device__ float ptx_exp2(float x) {
 }
 
 __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
-    half* output, // 1 * hidden_dim
+    float* output, // 1 * hidden_dim
     half* input,  // 1 * hidden_dim
     half* w_rms_input,// hidden_dim
     half* w_rms_attn, // hidden_dim
@@ -763,7 +763,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
             tmp += __shfl_down_sync(0xffffffff, tmp, mask);
         }
         if (lane_id % NUM_THREAD_PER_ROW_3 == 0) {
-            atomicAdd(&output[cluster_block_st_id + weight_idx_3 + (id - 1) * TMA_LOAD_ONCE], __float2half(tmp));
+            output[head_id * HIDDEN_DIM + cluster_block_st_id + weight_idx_3 + (id - 1) * TMA_LOAD_ONCE] = tmp;
             // input_shmem[weight_idx_3 + (id - 1) * TMA_LOAD_ONCE] = __float2half(tmp);
         }
         block.sync();
@@ -775,7 +775,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         #pragma unroll
         for (int d = 0; d < NUM_PER_THREAD; d++) {
             // tmp += __half2float(__hmul(reg_input[d], weight[TMA_LOAD_ONCE_NUM + (input_idx_3 + j + d) * TMA_LOAD_ONCE + weight_idx_3]));
-            tmp += __half2float(reg_input[d]) * __half2float(weight[TMA_LOAD_ONCE_NUM + (input_idx_3 + j + d) * TMA_LOAD_ONCE + weight_idx_3]);
+            tmp += __half2float(reg_input[d]) * __half2float(weight[(DIM_PER_BLOCK / TMA_LOAD_ONCE - 1) % 2 * TMA_LOAD_ONCE_NUM + (input_idx_3 + j + d) * TMA_LOAD_ONCE + weight_idx_3]);
         }
     }
     #pragma unroll
@@ -783,7 +783,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         tmp += __shfl_down_sync(0xffffffff, tmp, mask);
     }
     if (lane_id % NUM_THREAD_PER_ROW_3 == 0) {
-        atomicAdd(&output[cluster_block_st_id + weight_idx_3 + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE], __float2half(tmp));
+        output[head_id * HIDDEN_DIM + cluster_block_st_id + weight_idx_3 + (DIM_PER_BLOCK / TMA_LOAD_ONCE - 1) * TMA_LOAD_ONCE] = tmp;
         // input_shmem[weight_idx_3 + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE] = __float2half(tmp);
     }
     // block.sync();

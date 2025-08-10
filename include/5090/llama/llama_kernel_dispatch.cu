@@ -23,6 +23,10 @@ torch::Tensor llama_decoder_layer_sm120(
     torch::Tensor o = torch::full({1, HIDDEN_DIM}, 0, options);
     half* o_ptr = reinterpret_cast<half*>(o.data_ptr<at::Half>());
 
+    auto o_fp32 = torch::zeros({HIDDEN_DIM}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA, 0));
+    auto o_heads = torch::zeros({HEAD_NUM, HIDDEN_DIM}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA, 0));
+    float* o_heads_ptr = o_heads.data_ptr<float>();
+
     half* input_ptr = reinterpret_cast<half*>(input.data_ptr<at::Half>());
     half* weight_qkv_ptr = reinterpret_cast<half*>(weight_qkv.data_ptr<at::Half>());
     half* weight_o_ptr = reinterpret_cast<half*>(weight_o.data_ptr<at::Half>());
@@ -128,7 +132,7 @@ torch::Tensor llama_decoder_layer_sm120(
 
     cudaDeviceSynchronize();
     LlamaDecoderLayerKernel<<<grid, block, max_shmem_size>>>(
-        o_ptr,
+        o_heads_ptr,
         input_ptr,
         rms_input_weight_ptr,
         rms_attn_weight_ptr,
@@ -142,5 +146,7 @@ torch::Tensor llama_decoder_layer_sm120(
         KV_DIM_PER_BLOCK
     );
     cudaDeviceSynchronize();
+    o_fp32.copy_(o_heads.sum(0));    // [HIDDEN_DIM]
+    o.copy_(o_fp32.to(torch::kFloat16));
     return o;
 }
