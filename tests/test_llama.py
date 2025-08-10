@@ -222,9 +222,12 @@ def test_llama_decode_e2e():
         max_error_list.append(max_error)
         # print("Max Error:", max_error.item())
 
-    print(f"Max Error in MAE of {test_run} runs", max(mae_list).item())
     print(f"Max Error in MSE of {test_run} runs", max(mse_list).item())
+    print(f"Min Error in MSE of {test_run} runs", min(mse_list).item())
+    print(f"Max Error in MAE of {test_run} runs", max(mae_list).item())
+    print(f"Min Error in MAE of {test_run} runs", min(mae_list).item())
     print(f"Max Error in Max Errors of {test_run} runs", max(max_error_list).item())
+    print(f"Min Error in Max Errors of {test_run} runs", min(max_error_list).item())
     print(f"Count of Max Errors > 0.1: {sum(e.item() > 0.1 for e in max_error_list)}")
 
 if __name__ == "__main__":
