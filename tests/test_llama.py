@@ -7,7 +7,7 @@ from clusterfusion import llama_decoder_layer
 
 hidden_size = 4096
 num_heads = 32
-seqlen = 4096
+seqlen = 9
 head_dim = hidden_size // num_heads
 ffn_dim_gt = 11008  
 ffn_dim_fuse = 12288    
@@ -208,6 +208,7 @@ def test_llama_decode_e2e():
     nvtx.range_pop()
     print(o_gt.shape, o_gt)
     max_error_list = []
+    min_error_list = []
     mse_list = []
     mae_list = []
     for i in range(test_run):
@@ -224,9 +225,12 @@ def test_llama_decode_e2e():
         max_error_pos = torch.argmax(diff).item()
         # print(f"Run {i}: Max Error {max_error.item()} at position {max_error_pos}")
 
-    print(f"Max Error in MAE of {test_run} runs", max(mae_list).item())
     print(f"Max Error in MSE of {test_run} runs", max(mse_list).item())
+    print(f"Min Error in MSE of {test_run} runs", min(mse_list).item())
+    print(f"Max Error in MAE of {test_run} runs", max(mae_list).item())
+    print(f"Min Error in MAE of {test_run} runs", min(mae_list).item())
     print(f"Max Error in Max Errors of {test_run} runs", max(max_error_list).item())
+    print(f"Min Error in Max Errors of {test_run} runs", min(max_error_list).item())
     print(f"Count of Max Errors > 0.1: {sum(e.item() > 0.1 for e in max_error_list)}")
 
     max_error_value = max(max_error_list).item()
