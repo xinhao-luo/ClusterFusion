@@ -167,7 +167,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
             token[id % 2] = bar[id % 2].arrive();
         }
         bar[(id - 1) % 2].wait(std::move(token[(id - 1) % 2]));
-        cde::fence_proxy_async_shared_cta();
         for (int i = 0; i < TMA_LOAD_ONCE; i+=NUM_PER_ROW) { 
             *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + (id - 1) * TMA_LOAD_ONCE + i]);
             #pragma unroll
@@ -178,7 +177,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         }
     }
     bar[(DIM_PER_BLOCK / TMA_LOAD_ONCE - 1) % 2].wait(std::move(token[(DIM_PER_BLOCK / TMA_LOAD_ONCE - 1) % 2]));
-    cde::fence_proxy_async_shared_cta();
     for (int i = 0; i < TMA_LOAD_ONCE; i+=NUM_PER_ROW) { 
         *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE + i]);
         #pragma unroll
@@ -214,7 +212,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
             token[id % 2] = bar[id % 2].arrive();
         }
         bar[(id - 1) % 2].wait(std::move(token[(id - 1) % 2]));
-        cde::fence_proxy_async_shared_cta();
         for (int i = 0; i < TMA_LOAD_ONCE; i+=NUM_PER_ROW) { 
             *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + (id - 1) * TMA_LOAD_ONCE + i]);
             #pragma unroll
@@ -225,7 +222,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         }
     }
     bar[(DIM_PER_BLOCK / TMA_LOAD_ONCE - 1) % 2].wait(std::move(token[(DIM_PER_BLOCK / TMA_LOAD_ONCE - 1) % 2]));
-    cde::fence_proxy_async_shared_cta();
     for (int i = 0; i < TMA_LOAD_ONCE; i+=NUM_PER_ROW) { 
         *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE + i]);
         #pragma unroll
@@ -261,7 +257,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
             token[id % 2] = bar[id % 2].arrive();
         }
         bar[(id - 1) % 2].wait(std::move(token[(id - 1) % 2]));
-        cde::fence_proxy_async_shared_cta();
         for (int i = 0; i < TMA_LOAD_ONCE; i+=NUM_PER_ROW) { 
             *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + (id - 1) * TMA_LOAD_ONCE + i]);
             #pragma unroll
@@ -272,7 +267,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         }
     }
     bar[(DIM_PER_BLOCK / TMA_LOAD_ONCE - 1) % 2].wait(std::move(token[(DIM_PER_BLOCK / TMA_LOAD_ONCE - 1) % 2]));
-    cde::fence_proxy_async_shared_cta();
     for (int i = 0; i < TMA_LOAD_ONCE; i+=NUM_PER_ROW) { 
         *(uint4*)(&reg_input[0]) = *(uint4*)(&input_shmem[input_idx + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE + i]);
         #pragma unroll
@@ -457,7 +451,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
             token[id % 2] = bar[id % 2].arrive();
         }
         bar[(id - 1) % 2].wait(std::move(token[(id - 1) % 2]));
-        cde::fence_proxy_async_shared_cta();
         pre_max = local_max;
         #pragma unroll
         for (int j = 0; j < DEC_TILE; j++) {
@@ -497,7 +490,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
             token[2 + id % 2] = bar[2 + id % 2].arrive();
         }
         bar[2 + (id - 1) % 2].wait(std::move(token[2 + (id - 1) % 2]));
-        cde::fence_proxy_async_shared_cta();
         for (int j = 0; j < DEC_TILE; j++) {
             *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight[((id - 1) % 2) * TMA_LOAD_ONCE_NUM + TMA_LOAD_ONCE_NUM_ATTN + (weight_idx_2 + j) * HEAD_DIM + input_idx_2]);
             #pragma unroll
@@ -512,7 +504,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     } else {
         bar[0].wait(std::move(token[0]));
     }
-    cde::fence_proxy_async_shared_cta();
     pre_max = local_max;
     #pragma unroll
     for (int j = 0; j < DEC_TILE; j++) {
@@ -549,7 +540,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     } else {
         bar[2].wait(std::move(token[2]));
     }
-    cde::fence_proxy_async_shared_cta();
     for (int j = 0; j < DEC_TILE; j++) {
         *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight[((KV_DIM_PER_BLOCK / TMA_LOAD_ONCE_ATTN - 1) % 2) * TMA_LOAD_ONCE_NUM + TMA_LOAD_ONCE_NUM_ATTN + (weight_idx_2 + j) * HEAD_DIM + input_idx_2]);
         #pragma unroll
