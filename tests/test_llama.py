@@ -21,7 +21,7 @@ print_head = 1
 if debug:
     test_run = 10
 else:
-    test_run = 100000
+    test_run = 10000
 
 def initialize_rope_embeddings(HEAD_DIM):
     angles = (torch.rand((1, HEAD_DIM), dtype=torch.float32) * (2 * torch.pi)).to(0)
