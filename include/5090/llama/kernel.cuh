@@ -6,7 +6,7 @@ using barrier = cuda::barrier<cuda::thread_scope_block>;
 namespace cde = cuda::device::experimental;
 namespace cg = cooperative_groups;
 
-#define DEBUG
+// #define DEBUG
 #ifdef DEBUG
 #define PRINT_HEAD 1
 #endif
@@ -390,8 +390,13 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         // local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg + k_rope_1 * sin_reg);
     // }
     // NOTE: RoPE from llama/model.py
-    q_rope_1 = __half2float(local_qkv[tid ^ 1]);
-    k_rope_1 = __half2float(local_qkv[HEAD_DIM + (tid ^ 1)]);
+    if (tid % 2 == 0) {
+        q_rope_1 = __half2float(local_qkv[tid + 1]);
+        k_rope_1 = __half2float(local_qkv[HEAD_DIM + (tid + 1)]);
+    } else {
+        q_rope_1 = __half2float(local_qkv[tid - 1]);
+        k_rope_1 = __half2float(local_qkv[HEAD_DIM + (tid - 1)]);
+    }
     block.sync();
     if (tid % 2 == 0) {
         local_qkv[tid] = __float2half(q_rope * cos_reg - q_rope_1 * sin_reg);
