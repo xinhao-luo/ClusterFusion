@@ -7,7 +7,7 @@ from clusterfusion import llama_decoder_layer
 
 hidden_size = 4096
 num_heads = 32
-seqlen = 4096
+seqlen = 9
 head_dim = hidden_size // num_heads
 ffn_dim_gt = 11008  
 ffn_dim_fuse = 12288    
@@ -19,7 +19,7 @@ torch.set_printoptions(precision=4, sci_mode=False)
 debug = 0
 print_head = 1
 if debug:
-    test_run = 1
+    test_run = 10
 else:
     test_run = 10000
 
@@ -95,7 +95,8 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
         print("attn output O")
         print(f"o, head_id = {print_head}, o")
         print(f"{o[print_head, 0: 128]}")
-    o = o_proj(o.view(1, 32 * head_dim))
+    # o = o_proj(o.view(1, 32 * head_dim))
+    o = o.view(1, 32 * head_dim)
     if debug:
         print("final output o")
         print(o[0, 0:8])
@@ -109,7 +110,7 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
 
 # without ' * 0.1', the outputs of tilefusion and python both will be 'nan'
 def generate_random_weights(shape):
-    return (torch.randn(shape) * 0.2).to(0).half()
+    return (torch.randn(shape) * 0.1).to(0).half()
 
 def test_llama_decode_e2e():
     print(f"seqlen: {seqlen}")
@@ -206,26 +207,36 @@ def test_llama_decode_e2e():
     o_gt = llama_decode(input_tensor, rms_input_weight, rms_attn_weight, eps, kv_cache_gt, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, cos, sin)
     nvtx.range_pop()
     print(o_gt.shape, o_gt)
+    print("o_gt.abs.mean():", o_gt.abs().mean().item())
     max_error_list = []
+    min_error_list = []
     mse_list = []
     mae_list = []
     for i in range(test_run):
-        mae = (o[i] - o_gt).abs().mean()
+        diff = (o[i] - o_gt).abs()
+        mae = diff.mean()
         mae_list.append(mae)
-        # print("Mean Absolute Error (MAE):", mae.item())
 
-        mse = ((o[i] - o_gt) ** 2).mean()
+        mse = (diff ** 2).mean()
         mse_list.append(mse)
-        # print("Mean Squared Error (MSE):", mse.item())
 
-        max_error = (o[i] - o_gt).abs().max()
+        max_error = diff.max()
         max_error_list.append(max_error)
-        # print("Max Error:", max_error.item())
 
-    print(f"Max Error in MAE of {test_run} runs", max(mae_list).item())
+        max_error_pos = torch.argmax(diff).item()
+        # print(f"Run {i}: Max Error {max_error.item()} at position {max_error_pos}")
+
     print(f"Max Error in MSE of {test_run} runs", max(mse_list).item())
+    print(f"Min Error in MSE of {test_run} runs", min(mse_list).item())
+    print(f"Max Error in MAE of {test_run} runs", max(mae_list).item())
+    print(f"Min Error in MAE of {test_run} runs", min(mae_list).item())
     print(f"Max Error in Max Errors of {test_run} runs", max(max_error_list).item())
+    print(f"Min Error in Max Errors of {test_run} runs", min(max_error_list).item())
     print(f"Count of Max Errors > 0.1: {sum(e.item() > 0.1 for e in max_error_list)}")
+
+    max_error_value = max(max_error_list).item()
+    max_error_index = max_error_list.index(max(max_error_list))
+    print(f"Max Error occurs at run {max_error_index}, value: {max_error_value}")
 
 if __name__ == "__main__":
     test_llama_decode_e2e()
