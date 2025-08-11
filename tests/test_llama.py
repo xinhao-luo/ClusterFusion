@@ -110,7 +110,7 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
 
 # without ' * 0.1', the outputs of tilefusion and python both will be 'nan'
 def generate_random_weights(shape):
-    return (torch.randn(shape) * 0.2).to(0).half()
+    return (torch.randn(shape) * 0.1).to(0).half()
 
 def test_llama_decode_e2e():
     print(f"seqlen: {seqlen}")
@@ -207,6 +207,7 @@ def test_llama_decode_e2e():
     o_gt = llama_decode(input_tensor, rms_input_weight, rms_attn_weight, eps, kv_cache_gt, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, cos, sin)
     nvtx.range_pop()
     print(o_gt.shape, o_gt)
+    print("o_gt.abs.mean():", o_gt.abs().mean().item())
     max_error_list = []
     min_error_list = []
     mse_list = []
