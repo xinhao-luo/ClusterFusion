@@ -473,9 +473,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         // For filled zeros
         #pragma unroll
         for (int j = 0; j < DEC_TILE; j++) {
-            if ((KV_DIM_PER_BLOCK * cluster_block_id + (id - 1) * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) < (SEQ_LEN + 1)) {
+            if ((KV_DIM_PER_BLOCK * cluster_block_id + (id - 1) * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) < SEQ_LEN) {
                 qk[j] = ptx_exp2(qk[j] - local_max);
                 local_sum += qk[j];
+            } else {
+                qk[j] = 0.0f;
             }
         }
         #pragma unroll
@@ -525,9 +527,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     local_sum *= scale;
     #pragma unroll
     for (int j = 0; j < DEC_TILE; j++) {
-        if ((KV_DIM_PER_BLOCK * cluster_block_id + (KV_DIM_PER_BLOCK / TMA_LOAD_ONCE_ATTN - 1) * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) < (SEQ_LEN + 1)) {
+        if ((KV_DIM_PER_BLOCK * cluster_block_id + (KV_DIM_PER_BLOCK / TMA_LOAD_ONCE_ATTN - 1) * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) < SEQ_LEN) {
             qk[j] = ptx_exp2(qk[j] - local_max);
             local_sum += qk[j];
+        } else {
+            local_sum = 0.0f;
         }
     }
     #pragma unroll

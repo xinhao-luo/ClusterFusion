@@ -7,7 +7,7 @@ from clusterfusion import llama_decoder_layer
 
 hidden_size = 4096
 num_heads = 32
-seqlen = 9
+seqlen = 4096
 head_dim = hidden_size // num_heads
 ffn_dim_gt = 11008  
 ffn_dim_fuse = 12288    
