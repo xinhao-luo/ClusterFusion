@@ -1,5 +1,6 @@
 #include <cuda/barrier>
 #include <cudaTypedefs.h>
+#include <math_constants.h> 
 #include "../../dsm.cuh"
 #include "config.h"
 using barrier = cuda::barrier<cuda::thread_scope_block>;
@@ -65,7 +66,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     __shared__ float cluster_local_sum, cluster_local_max;
 
     // Init registers
-    float local_sum = 0.0, eps = 1e-6, rms_rcp = 0.0, tmp = 0.0, local_max = 0.0, pre_max = 0.0, scale = 0.0, softmax_scale = __frsqrt_rn(HEAD_DIM) * 1.44269504088896340736f;
+    float local_sum = 0.0, eps = 1e-6, rms_rcp = 0.0, tmp = 0.0, local_max = -CUDART_INF_F, pre_max = -CUDART_INF_F, scale = 0.0, softmax_scale = __frsqrt_rn(HEAD_DIM) * 1.44269504088896340736f;
     half __align__(16) reg_input[NUM_PER_THREAD], reg_weight[NUM_PER_THREAD];
     float reg_reduce[NUM_PER_THREAD];
     float* dst_shmem;
@@ -476,8 +477,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
             if ((KV_DIM_PER_BLOCK * cluster_block_id + (id - 1) * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) < SEQ_LEN) {
                 qk[j] = ptx_exp2(qk[j] - local_max);
                 local_sum += qk[j];
-            } else {
-                qk[j] = 0.0f;
             }
         }
         #pragma unroll
@@ -530,8 +529,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         if ((KV_DIM_PER_BLOCK * cluster_block_id + (KV_DIM_PER_BLOCK / TMA_LOAD_ONCE_ATTN - 1) * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) < SEQ_LEN) {
             qk[j] = ptx_exp2(qk[j] - local_max);
             local_sum += qk[j];
-        } else {
-            local_sum = 0.0f;
         }
     }
     #pragma unroll

@@ -13,7 +13,6 @@ ffn_dim_gt = 11008
 ffn_dim_fuse = 12288    
 
 torch.manual_seed(42)
-torch.set_printoptions(precision=4, sci_mode=False)
 
 # Enable Debug print
 debug = 0
@@ -95,8 +94,7 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
         print("attn output O")
         print(f"o, head_id = {print_head}, o")
         print(f"{o[print_head, 0: 128]}")
-    # o = o_proj(o.view(1, 32 * head_dim))
-    o = o.view(1, 32 * head_dim)
+    o = o_proj(o.view(1, 32 * head_dim))
     if debug:
         print("final output o")
         print(o[0, 0:8])
@@ -206,8 +204,10 @@ def test_llama_decode_e2e():
     nvtx.range_push("llama_decode")
     o_gt = llama_decode(input_tensor, rms_input_weight, rms_attn_weight, eps, kv_cache_gt, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, cos, sin)
     nvtx.range_pop()
-    print(o_gt.shape, o_gt)
+    print(o_gt.shape)
     print("o_gt.abs.mean():", o_gt.abs().mean().item())
+    print("Ours[..., 0: 128]", o[0][..., 0:128])
+    print("Ref[..., 0: 128]", o_gt[..., 0:128])
     max_error_list = []
     min_error_list = []
     mse_list = []
