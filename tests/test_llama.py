@@ -15,6 +15,14 @@ ffn_dim_fuse = 12288
 torch.manual_seed(42)
 torch.set_printoptions(precision=4, sci_mode=False)
 
+# Enable Debug print
+debug = 0
+print_head = 1
+if debug:
+    test_run = 10
+else:
+    test_run = 10000
+
 def initialize_rope_embeddings(HEAD_DIM):
     angles = (torch.rand((1, HEAD_DIM), dtype=torch.float32) * (2 * torch.pi)).to(0)
     h_cos = torch.cos(angles)
@@ -89,7 +97,6 @@ def test_llama_decode_e2e():
     cos, sin = initialize_rope_embeddings(head_dim)
     # Our kernel
     o = []
-    test_run = 10000
     for i in range(test_run):
         o.append(llama_decoder_layer(
             input_tensor,          
@@ -159,14 +166,14 @@ def test_llama_decode_e2e():
     max_error_overall = 0
     count_of_large_error = 0
     for i in range(test_run):
-        mae = (o[i] - o_gt).abs().mean()
-        print("Mean Absolute Error (MAE):", mae.item())
+        # mae = (o[i] - o_gt).abs().mean()
+        # print("Mean Absolute Error (MAE):", mae.item())
 
-        mse = ((o[i] - o_gt) ** 2).mean()
-        print("Mean Squared Error (MSE):", mse.item())
+        # mse = ((o[i] - o_gt) ** 2).mean()
+        # print("Mean Squared Error (MSE):", mse.item())
 
         max_error = (o[i] - o_gt).abs().max()
-        print("Max Error:", max_error.item())
+        # print("Max Error:", max_error.item())
         max_error_overall = max(max_error, max_error_overall)
         if (max_error.item() > 0.125):
             count_of_large_error += 1
