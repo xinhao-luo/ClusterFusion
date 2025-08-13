@@ -1,4 +1,4 @@
-# ClusterFusion: Expanding Operator Fusion Scope for LLM Inference via Cluster-Level Collective Primitive
+<!-- # ClusterFusion: Expanding Operator Fusion Scope for LLM Inference via Cluster-Level Collective Primitive
 
 This repository contains the official implementation of **ClusterFusion: Expanding Operator Fusion Scope for LLM Inference via Cluster-Level Collective Primitive**.
 
@@ -41,4 +41,4 @@ cd workspace
 CUDA_VISIBLE_DEVICES=0 nvcc --generate-code=arch=compute_90a,code=sm_90a -O3 -std=c++17 -lcuda linear-attn.cu -o test && ./test
 ```
 Configurations such as batch size and sequence length can be modified in `config.h` or `config_linear-attn.h`.
-
+ -->
