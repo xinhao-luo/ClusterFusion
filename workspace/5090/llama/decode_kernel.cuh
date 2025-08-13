@@ -1,5 +1,6 @@
 #include <cuda/barrier>
 #include <cudaTypedefs.h>
+#include <math_constants.h> 
 #include "../../dsm.cuh"
 #include "config.h"
 using barrier = cuda::barrier<cuda::thread_scope_block>;
@@ -65,7 +66,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     __shared__ float cluster_local_sum, cluster_local_max;
 
     // Init registers
-    float local_sum = 0.0, eps = 1e-6, rms_rcp = 0.0, tmp = 0.0, local_max = 0.0, pre_max = 0.0, scale = 0.0, softmax_scale = __frsqrt_rn(HEAD_DIM) * 1.44269504088896340736f;
+    float local_sum = 0.0, eps = 1e-6, rms_rcp = 0.0, tmp = 0.0, local_max = -CUDART_INF_F, pre_max = -CUDART_INF_F, scale = 0.0, softmax_scale = __frsqrt_rn(HEAD_DIM) * 1.44269504088896340736f;
     half __align__(16) reg_input[NUM_PER_THREAD], reg_weight[NUM_PER_THREAD];
     float reg_reduce[NUM_PER_THREAD];
     float* dst_shmem;
@@ -367,21 +368,39 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     k_rope = __half2float(local_qkv[HEAD_DIM + tid]);
     cos_reg = cos[tid];
     sin_reg = sin[tid];
-    if (tid < HEAD_DIM / 2) {
-        q_rope_1 = __half2float(local_qkv[HEAD_DIM / 2 + tid]);
-        k_rope_1 = __half2float(local_qkv[HEAD_DIM + HEAD_DIM / 2 + tid]);
+    // NOTE: Original RoPE
+    // if (tid < HEAD_DIM / 2) {
+        // q_rope_1 = __half2float(local_qkv[HEAD_DIM / 2 + tid]);
+        // k_rope_1 = __half2float(local_qkv[HEAD_DIM + HEAD_DIM / 2 + tid]);
+    // } else {
+        // q_rope_1 = __half2float(local_qkv[tid - HEAD_DIM / 2]);
+        // k_rope_1 = __half2float(local_qkv[HEAD_DIM + tid - HEAD_DIM / 2]);
+    // }
+    // block.sync();
+    // if (tid < HEAD_DIM / 2) {
+        // local_qkv[tid] = __float2half(q_rope * cos_reg - q_rope_1 * sin_reg);
+        // local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg - k_rope_1 * sin_reg);
+    // } else {
+        // local_qkv[tid] = __float2half(q_rope * cos_reg + q_rope_1 * sin_reg);
+        // local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg + k_rope_1 * sin_reg);
+    // }
+    // NOTE: RoPE from llama/model.py
+    if (tid % 2 == 0) {
+        q_rope_1 = __half2float(local_qkv[tid + 1]);
+        k_rope_1 = __half2float(local_qkv[HEAD_DIM + (tid + 1)]);
     } else {
-        q_rope_1 = __half2float(local_qkv[tid - HEAD_DIM / 2]);
-        k_rope_1 = __half2float(local_qkv[HEAD_DIM + tid - HEAD_DIM / 2]);
+        q_rope_1 = __half2float(local_qkv[tid - 1]);
+        k_rope_1 = __half2float(local_qkv[HEAD_DIM + (tid - 1)]);
     }
     block.sync();
-    if (tid < HEAD_DIM / 2) {
+    if (tid % 2 == 0) {
         local_qkv[tid] = __float2half(q_rope * cos_reg - q_rope_1 * sin_reg);
         local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg - k_rope_1 * sin_reg);
     } else {
         local_qkv[tid] = __float2half(q_rope * cos_reg + q_rope_1 * sin_reg);
         local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg + k_rope_1 * sin_reg);
     }
+
 
 #ifdef DEBUG
     // DEBUG PRINT
@@ -455,7 +474,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         // For filled zeros
         #pragma unroll
         for (int j = 0; j < DEC_TILE; j++) {
-            if ((KV_DIM_PER_BLOCK * cluster_block_id + (id - 1) * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) < (SEQ_LEN + 1)) {
+            if ((KV_DIM_PER_BLOCK * cluster_block_id + (id - 1) * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) < SEQ_LEN) {
                 qk[j] = ptx_exp2(qk[j] - local_max);
                 local_sum += qk[j];
             }
@@ -507,7 +526,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     local_sum *= scale;
     #pragma unroll
     for (int j = 0; j < DEC_TILE; j++) {
-        if ((KV_DIM_PER_BLOCK * cluster_block_id + (KV_DIM_PER_BLOCK / TMA_LOAD_ONCE_ATTN - 1) * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) < (SEQ_LEN + 1)) {
+        if ((KV_DIM_PER_BLOCK * cluster_block_id + (KV_DIM_PER_BLOCK / TMA_LOAD_ONCE_ATTN - 1) * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) < SEQ_LEN) {
             qk[j] = ptx_exp2(qk[j] - local_max);
             local_sum += qk[j];
         }
@@ -772,20 +791,4 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     // for (int i = 0; i < DIM_PER_BLOCK / BLOCK_SIZE; i++) {
         // atomicAdd(&output[cluster_block_st_id + tid * DIM_PER_BLOCK / BLOCK_SIZE + i], input_shmem[tid * DIM_PER_BLOCK / BLOCK_SIZE + i]);
     // }
-
-#ifdef DEBUG
-    // DEBUG PRINT
-    if (tid == 0 && (head_id == PRINT_HEAD) && cluster_block_id == 2) {
-        printf("================= After O_proj(attn output) =================\n");
-        printf("\noutput[0: 8]\n");
-        for (int i = 0; i < 8; i++) {
-            printf("%f ", __half2float(output[i]));
-        }
-        printf("\noutput[4088: 4096]\n");
-        for (int i = 4088; i < 4096; i++) {
-            printf("%f ", __half2float(output[i]));
-        }
-        printf("\n");
-    }
-#endif
 }
