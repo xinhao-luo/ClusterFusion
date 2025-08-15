@@ -345,8 +345,8 @@ class Attention(nn.Module):
         bsz, seqlen, _ = x.shape
         if self.use_cluster_fusion and mask is None:
 
-            kv_cache_k = self.cache_k[:bsz, :start_pos + seqlen].contiguous().view(-1, self.n_local_kv_heads * self.head_dim)
-            kv_cache_v = self.cache_v[:bsz, :start_pos + seqlen].contiguous().view(-1, self.n_local_kv_heads * self.head_dim)
+            kv_cache_k = self.cache_k[:bsz, :start_pos + seqlen].view(-1, self.n_local_kv_heads * self.head_dim)
+            kv_cache_v = self.cache_v[:bsz, :start_pos + seqlen].view(-1, self.n_local_kv_heads * self.head_dim)
         
             return llama_decoder_layer(
                 x,          
