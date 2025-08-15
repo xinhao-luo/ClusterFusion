@@ -260,28 +260,56 @@ class Attention(nn.Module):
         self.attention_kernel = original_attention
 
         self.use_cluster_fusion = os.getenv("USE_CLUSTER_FUSION", 'false').lower() == 'true'
+        
 
         if self.use_cluster_fusion:
-            def get_weights_hook(self):
-                normal_qkv = nn.Linear(args.dim, 3 * args.dim, bias=False)
-                normal_qkv = normal_qkv.to(device='cuda', dtype=torch.float16)
-                
-                with torch.no_grad():
-
-                    if hasattr(self.wq, 'weight') and self.wq.weight is not None:
-                        qw_shape = self.wq.weight.shape
-                        
-                        normal_qkv.weight.data[:args.dim] = self.wq.weight.data.T
-                        normal_qkv.weight.data[args.dim:2*args.dim] = self.wk.weight.data.T
-                        normal_qkv.weight.data[2*args.dim:] = self.wv.weight.data.T
-                    wo_weight = None
-                    if hasattr(self.wo, 'weight') and self.wo.weight is not None:
-                        wo_weight = self.wo.weight.data.T.contiguous()
-                        
-                return normal_qkv.weight.data, wo_weight
-            
-            self._get_weights_hook = get_weights_hook
+            self.weight_qkv = None
+            self.weight_o = None
             self.weights_initialized = False
+            def _post_load_hook(module, incompatible_keys):
+                module._build_cf_weights()
+
+            self.register_load_state_dict_post_hook(_post_load_hook)
+            self.weights_initialized = False
+
+    def _build_cf_weights(self):
+        """
+        在权重全部 ready（如 load_state_dict 之后）构建 cluster_fusion 需要的 fused 权重。
+        """
+        if not self.use_cluster_fusion:
+            return
+        with torch.no_grad():
+            world = fs_init.get_model_parallel_world_size()
+            # 收集完整权重（world_size>1 时用 master weight）
+            if world == 1:
+                wq_full = self.wq.weight.data         # [dim, dim]
+                wk_full = self.wk.weight.data         # [dim, dim]
+                wv_full = self.wv.weight.data         # [dim, dim]
+                wo_full = self.wo.weight.data         # [dim, dim]
+            else:
+                # fairscale 提供的聚合 API
+                wq_full = self.wq.get_master_weight().data     # [dim, dim]
+                wk_full = self.wk.get_master_weight().data     # [dim, dim]
+                wv_full = self.wv.get_master_weight().data     # [dim, dim]
+                wo_full = self.wo.get_master_weight().data     # [dim, dim]
+
+            args_dim = wq_full.shape[0]
+            device = wq_full.device
+            dtype = wq_full.dtype
+
+            normal_qkv = torch.empty(3 * args_dim, args_dim, device=device, dtype=dtype)
+            normal_qkv[:args_dim] = wq_full.t().contiguous()
+            normal_qkv[args_dim:2*args_dim] = wk_full.t().contiguous()
+            normal_qkv[2*args_dim:] = wv_full.t().contiguous()
+
+            wo_weight = wo_full.t().contiguous()
+
+            want_dtype = torch.float16 if device.type == "cuda" else dtype
+            self.weight_qkv = normal_qkv.to(dtype=want_dtype)
+            self.weight_o = wo_weight.to(dtype=want_dtype)
+
+            self.weights_initialized = True
+
 
     def forward(
         self,
@@ -306,12 +334,12 @@ class Attention(nn.Module):
         """
         bsz, seqlen, _ = x.shape
         if self.use_cluster_fusion and not self.weights_initialized:
-            self.weight_qkv, self.weight_o = self._get_weights_hook(self)
-            self.weights_initialized = True
-            torch.cuda.synchronize()
+                raise RuntimeError(
+                    "ClusterFusion 权重未初始化。请在加载 checkpoint 后调用 "
+                    "Transformer.prepare_cluster_fusion() 或 Attention.prepare_cluster_fusion()。"
+                )
         if self.use_cluster_fusion and mask is None:
 
-            input_tensor = x.view(1, -1)
             kv_cache_k = self.cache_k[:bsz, :start_pos + seqlen].contiguous().view(-1, self.n_local_kv_heads * self.head_dim)
             kv_cache_v = self.cache_v[:bsz, :start_pos + seqlen].contiguous().view(-1, self.n_local_kv_heads * self.head_dim)
             rms_input_weight = rms_input_weight.reshape(1, 4096)
@@ -321,8 +349,8 @@ class Attention(nn.Module):
             cos_full = torch.repeat_interleave(freqs_cis.real, 2, dim=-1)  # (seqlen, head_dim)
             sin_full = torch.repeat_interleave(freqs_cis.imag, 2, dim=-1)  # (seqlen, head_dim)
         
-            output = llama_decoder_layer(
-                input_tensor,          
+            return llama_decoder_layer(
+                x,          
                 self.weight_qkv,                          
                 self.weight_o,              
                 kv_cache_k,
@@ -333,9 +361,7 @@ class Attention(nn.Module):
                 rms_attn_weight,       
                 cos_full,                   
                 sin_full               
-            )
-            output = output.view(bsz, seqlen, 4096)
-            return output
+            ).view(bsz, seqlen, 4096)
         else:
             xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
@@ -571,3 +597,10 @@ class Transformer(nn.Module):
         h = self.norm(h)
         output = self.output(h).float()
         return output
+
+    def prepare_cluster_fusion(self):
+        """
+        在 load_state_dict 之后调用：为所有 Attention 层构建 fused 权重。
+        """
+        for layer in self.layers:
+            layer.attention.prepare_cluster_fusion()
