@@ -263,9 +263,19 @@ class Attention(nn.Module):
         
 
         if self.use_cluster_fusion:
+            head_dim = args.dim // args.n_heads
+            freqs_cis = precompute_freqs_cis(head_dim, args.max_seq_len * 2)  # (L, head_dim/2)
+            cos = torch.repeat_interleave(freqs_cis.real, 2, dim=-1)  # (L, head_dim)
+            sin = torch.repeat_interleave(freqs_cis.imag, 2, dim=-1)  # (L, head_dim)
+            # 注册为 buffer，随模型迁移设备/精度，不写入 checkpoint
+            self.register_buffer("rotary_cos", cos, persistent=False)
+            self.register_buffer("rotary_sin", sin, persistent=False)
             self.weight_qkv = None
             self.weight_o = None
             self.weights_initialized = False
+            self.rms_attn_weight = torch.zeros(0, device='cuda')
+            self.gate_up_proj_weight_fuse = torch.zeros(0, device='cuda')
+            self.down_proj_weight_fuse = torch.zeros(0, device='cuda')
             def _post_load_hook(module, incompatible_keys):
                 module._build_cf_weights()
 
@@ -333,21 +343,10 @@ class Attention(nn.Module):
 
         """
         bsz, seqlen, _ = x.shape
-        if self.use_cluster_fusion and not self.weights_initialized:
-                raise RuntimeError(
-                    "ClusterFusion 权重未初始化。请在加载 checkpoint 后调用 "
-                    "Transformer.prepare_cluster_fusion() 或 Attention.prepare_cluster_fusion()。"
-                )
         if self.use_cluster_fusion and mask is None:
 
             kv_cache_k = self.cache_k[:bsz, :start_pos + seqlen].contiguous().view(-1, self.n_local_kv_heads * self.head_dim)
             kv_cache_v = self.cache_v[:bsz, :start_pos + seqlen].contiguous().view(-1, self.n_local_kv_heads * self.head_dim)
-            rms_input_weight = rms_input_weight.reshape(1, 4096)
-            rms_attn_weight = torch.zeros(self.head_dim, device=x.device)
-            gate_up_proj_weight_fuse = torch.zeros(self.head_dim, device=x.device)
-            down_proj_weight_fuse = torch.zeros(self.head_dim, device=x.device)
-            cos_full = torch.repeat_interleave(freqs_cis.real, 2, dim=-1)  # (seqlen, head_dim)
-            sin_full = torch.repeat_interleave(freqs_cis.imag, 2, dim=-1)  # (seqlen, head_dim)
         
             return llama_decoder_layer(
                 x,          
@@ -355,12 +354,12 @@ class Attention(nn.Module):
                 self.weight_o,              
                 kv_cache_k,
                 kv_cache_v,           
-                gate_up_proj_weight_fuse,      
-                down_proj_weight_fuse,      
+                self.gate_up_proj_weight_fuse,      
+                self.down_proj_weight_fuse,      
                 rms_input_weight,      
-                rms_attn_weight,       
-                cos_full,                   
-                sin_full               
+                self.rms_attn_weight,       
+                self.rotary_cos[start_pos:start_pos+seqlen].to(device=x.device),
+                self.rotary_sin[start_pos:start_pos+seqlen].to(device=x.device)
             ).view(bsz, seqlen, 4096)
         else:
             xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
