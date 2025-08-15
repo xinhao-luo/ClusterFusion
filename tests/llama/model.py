@@ -261,17 +261,6 @@ class Attention(nn.Module):
 
         self.use_cluster_fusion = os.getenv("USE_CLUSTER_FUSION", 'false').lower() == 'true'
 
-        # Profiler
-        self.prefill_duration_ms = 0.0
-        self.prefill_call_count = 0
-        self.decode_duration_ms = 0.0
-        self.decode_call_count = 0
-        self.total_tokens_processed = 0
-        self.start_event = torch.cuda.Event(enable_timing=True)
-        self.end_event = torch.cuda.Event(enable_timing=True)
-        self.total_duration_ms = 0.0
-        self.wordy = False # set to true will make it output time for every attention call, slowing down overall generation.
-
         if self.use_cluster_fusion:
             def get_weights_hook(self):
                 normal_qkv = nn.Linear(args.dim, 3 * args.dim, bias=False)
@@ -373,41 +362,11 @@ class Attention(nn.Module):
             keys = keys.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
             values = values.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
 
-            self.start_event.record()
             output = self.attention_kernel(xq, keys, values, mask)
-            self.end_event.record()
-            torch.cuda.synchronize()
-            
-            duration_ms = self.start_event.elapsed_time(self.end_event)
-            self.total_duration_ms += duration_ms
-
-            self.total_tokens_processed += xq.size(0) * xq.size(2) # bsz * seqlen
-            if xq.size(2) > 1: # prefill
-                self.prefill_duration_ms += duration_ms
-                self.prefill_call_count += 1
-            else: # decode
-                self.decode_duration_ms += duration_ms
-                self.decode_call_count += 1
 
             output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
             output = self.wo(output)
             return output
-
-    # profile summary
-    def print_summary(self, layer_id):
-        print(f"--- layer {layer_id} attention summary ({self.method_name}) ---")
-        if self.prefill_call_count > 0:
-            avg_prefill_time = self.prefill_duration_ms / self.prefill_call_count
-            print(f"  prefill : {self.prefill_duration_ms:.2f} ms total, {self.prefill_call_count} calls, {avg_prefill_time:.2f} ms/call")
-        
-        if self.decode_call_count > 0:
-            avg_decode_time = self.decode_duration_ms / self.decode_call_count
-            avg_decode_token_time = self.decode_duration_ms / self.total_tokens_processed if self.total_tokens_processed > 0 else 0
-            print(f"  decode  : {self.decode_duration_ms:.2f} ms total, {self.decode_call_count} calls, {avg_decode_time:.2f} ms/call")
-            print(f"  tokens processed: {self.total_tokens_processed}, avg time/token: {avg_decode_token_time:.3f} ms")
-        print("-" * (30 + len(self.method_name)))
-
-
 
 class FeedForward(nn.Module):
     def __init__(
