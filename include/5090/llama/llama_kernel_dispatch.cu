@@ -63,7 +63,7 @@ torch::Tensor llama_decoder_layer_sm120(
         CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
     );
 
-    uint64_t size_k_cache[rank] = {HIDDEN_DIM, SEQ_LEN};
+    uint64_t size_k_cache[rank] = {HIDDEN_DIM, SEQ_LEN - 1};
     uint64_t stride_k_cache[rank - 1] = {HIDDEN_DIM * sizeof(half)};
     uint32_t box_size_k_cache[rank] = {HEAD_DIM, TMA_LOAD_ONCE / 2};
     uint32_t elem_stride_k_cache[rank] = {1, 1};
@@ -83,7 +83,7 @@ torch::Tensor llama_decoder_layer_sm120(
         CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
     );
 
-    uint64_t size_v_cache[rank] = {HIDDEN_DIM, SEQ_LEN};
+    uint64_t size_v_cache[rank] = {HIDDEN_DIM, SEQ_LEN - 1};
     uint64_t stride_v_cache[rank - 1] = {HIDDEN_DIM * sizeof(half)};
     uint32_t box_size_v_cache[rank] = {HEAD_DIM, TMA_LOAD_ONCE / 2};
     uint32_t elem_stride_v_cache[rank] = {1, 1};
