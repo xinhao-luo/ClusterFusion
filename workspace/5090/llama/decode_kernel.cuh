@@ -25,6 +25,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     half* w_rms_attn, // hidden_dim
     float* cos,       // head_dim
     float* sin,       // head_dim
+    half* k_cache,
+    half* v_cache,
     const __grid_constant__ CUtensorMap tensor_map, // 3 * hidden_dim * hidden_dim
     const __grid_constant__ CUtensorMap tensor_map_k_cache, // seqlen * head_num * head_dim
     const __grid_constant__ CUtensorMap tensor_map_v_cache, // seqlen * head_num * head_dim
@@ -425,6 +427,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         printf("\n");
     }
 #endif
+
+    // Update KV Cache
+    block.sync();
+    k_cache[(SEQ_LEN - 1) * HIDDEN_DIM + cluster_head_idx + tid] = local_qkv[HEAD_DIM + tid];
+    v_cache[(SEQ_LEN - 1) * HIDDEN_DIM + cluster_head_idx + tid] = local_qkv[2 * HEAD_DIM + tid];
 
     // Compute flash-decoding
     local_sum = 0.0f;
