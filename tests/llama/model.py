@@ -296,7 +296,6 @@ class Attention(nn.Module):
 
     def forward(
         self,
-        unnormed_x: torch.Tensor,
         x: torch.Tensor,
         start_pos: int,
         freqs_cis: torch.Tensor,
@@ -323,9 +322,9 @@ class Attention(nn.Module):
             torch.cuda.synchronize()
         if self.use_cluster_fusion and mask is None:
 
-            input_tensor = unnormed_x.view(1, -1)
-            kv_cache_k = self.cache_k[:bsz, :start_pos].contiguous().view(-1, self.n_local_kv_heads * self.head_dim)
-            kv_cache_v = self.cache_v[:bsz, :start_pos].contiguous().view(-1, self.n_local_kv_heads * self.head_dim)
+            input_tensor = x.view(1, -1)
+            kv_cache_k = self.cache_k[:bsz, :start_pos + seqlen].contiguous().view(-1, self.n_local_kv_heads * self.head_dim)
+            kv_cache_v = self.cache_v[:bsz, :start_pos + seqlen].contiguous().view(-1, self.n_local_kv_heads * self.head_dim)
             rms_input_weight = rms_input_weight.reshape(1, 4096)
             rms_attn_weight = torch.zeros(self.head_dim, device=x.device)
             gate_up_proj_weight_fuse = torch.zeros(self.head_dim, device=x.device)
@@ -333,19 +332,6 @@ class Attention(nn.Module):
             cos_full = torch.repeat_interleave(freqs_cis.real, 2, dim=-1)  # (seqlen, head_dim)
             sin_full = torch.repeat_interleave(freqs_cis.imag, 2, dim=-1)  # (seqlen, head_dim)
         
-            # TODO: Update KV cache in kernel
-            # Update KV cache
-            xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-            
-            xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-            xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-            xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-            xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
-            self.cache_k = self.cache_k.to(xq)
-            self.cache_v = self.cache_v.to(xq)
-            self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-            self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
-
             output = llama_decoder_layer(
                 input_tensor,          
                 self.weight_qkv,                          
@@ -501,6 +487,18 @@ class TransformerBlock(nn.Module):
         self.layer_id = layer_id
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
+        self.use_cluster_fusion = os.getenv("USE_CLUSTER_FUSION", 'false').lower() == 'true'
+        def original_forward(x, start_pos, freqs_cis, mask):
+            return x + self.attention(self.attention_norm(x), start_pos, freqs_cis, mask, self.attention_norm.weight)
+        def clusterfusion_forward(x, start_pos, freq_cis, mask):
+            if mask != None:
+                return x + self.attention(self.attention_norm(x), start_pos, freq_cis, mask, self.attention_norm.weight)
+            else:
+                return x + self.attention(x, start_pos, freq_cis, mask, self.attention_norm.weight)
+        if self.use_cluster_fusion:
+            self.forward_method = clusterfusion_forward
+        else:
+            self.forward_method = original_forward
 
     def forward(
         self,
@@ -522,9 +520,7 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.attention(
-            x, self.attention_norm(x), start_pos, freqs_cis, mask, self.attention_norm.weight
-        )
+        h = self.forward_method(x, start_pos, freqs_cis, mask)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 

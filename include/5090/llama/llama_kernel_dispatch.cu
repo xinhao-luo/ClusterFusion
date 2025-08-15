@@ -134,6 +134,8 @@ torch::Tensor llama_decoder_layer_sm120(
         rms_attn_weight_ptr,
         cos_ptr,
         sin_ptr,
+        k_cache_ptr,
+        v_cache_ptr,
         tensor_map_weight,
         tensor_map_k_cache,
         tensor_map_v_cache,
