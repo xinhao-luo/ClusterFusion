@@ -22,7 +22,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     half* output, // 1 * hidden_dim
     half* input,  // 1 * hidden_dim
     half* w_rms_input,// hidden_dim
-    half* w_rms_attn, // hidden_dim
     float* cos,       // head_dim
     float* sin,       // head_dim
     half* k_cache,

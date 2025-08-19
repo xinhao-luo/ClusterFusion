@@ -7,10 +7,7 @@ torch::Tensor llama_decoder_layer_sm120(
     torch::Tensor weight_o,
     torch::Tensor k_cache,
     torch::Tensor v_cache,
-    torch::Tensor gate_up_proj_weight,
-    torch::Tensor down_proj_weight,
     torch::Tensor rms_input_weight,
-    torch::Tensor rms_attn_weight,
     torch::Tensor cos,
     torch::Tensor sin
 ) 
@@ -28,10 +25,7 @@ torch::Tensor llama_decoder_layer_sm120(
     half* weight_o_ptr = reinterpret_cast<half*>(weight_o.data_ptr<at::Half>());
     half* k_cache_ptr = reinterpret_cast<half*>(k_cache.data_ptr<at::Half>());
     half* v_cache_ptr = reinterpret_cast<half*>(v_cache.data_ptr<at::Half>());
-    half* gate_up_proj_weight_ptr = reinterpret_cast<half*>(gate_up_proj_weight.data_ptr<at::Half>());
-    half* down_proj_weight_ptr = reinterpret_cast<half*>(down_proj_weight.data_ptr<at::Half>());
     half* rms_input_weight_ptr = reinterpret_cast<half*>(rms_input_weight.data_ptr<at::Half>());
-    half* rms_attn_weight_ptr = reinterpret_cast<half*>(rms_attn_weight.data_ptr<at::Half>());
     float* cos_ptr = reinterpret_cast<float*>(cos.data_ptr<float>());
     float* sin_ptr = reinterpret_cast<float*>(sin.data_ptr<float>());
 
@@ -131,7 +125,6 @@ torch::Tensor llama_decoder_layer_sm120(
         o_ptr,
         input_ptr,
         rms_input_weight_ptr,
-        rms_attn_weight_ptr,
         cos_ptr,
         sin_ptr,
         k_cache_ptr,

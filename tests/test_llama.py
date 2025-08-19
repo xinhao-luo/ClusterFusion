@@ -146,10 +146,7 @@ def test_llama_decode_e2e():
             weight_o,              
             kv_cache_full[0],
             kv_cache_full[1],           
-            gate_up_proj_weight_fuse,      
-            down_proj_weight_fuse,      
             rms_input_weight,      
-            rms_attn_weight,       
             cos,                   
             sin                    
         ))

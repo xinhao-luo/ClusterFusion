@@ -41,10 +41,7 @@ torch::Tensor llama_decoder_layer_sm120(
     torch::Tensor weight_o,
     torch::Tensor k_cache,
     torch::Tensor v_cache,
-    torch::Tensor gate_up_proj_weight,
-    torch::Tensor down_proj_weight,
     torch::Tensor rms_input_weight,
-    torch::Tensor rms_attn_weight,
     torch::Tensor cos,
     torch::Tensor sin
 );

@@ -273,9 +273,6 @@ class Attention(nn.Module):
             self.weight_qkv = None
             self.weight_o = None
             self.weights_initialized = False
-            self.rms_attn_weight = torch.zeros(0, device='cuda')
-            self.gate_up_proj_weight_fuse = torch.zeros(0, device='cuda')
-            self.down_proj_weight_fuse = torch.zeros(0, device='cuda')
             def _post_load_hook(module, incompatible_keys):
                 module._build_cf_weights()
 
@@ -354,10 +351,7 @@ class Attention(nn.Module):
                 self.weight_o,              
                 kv_cache_k,
                 kv_cache_v,           
-                self.gate_up_proj_weight_fuse,      
-                self.down_proj_weight_fuse,      
                 rms_input_weight,      
-                self.rms_attn_weight,       
                 self.rotary_cos[start_pos:start_pos+seqlen].to(device=x.device),
                 self.rotary_sin[start_pos:start_pos+seqlen].to(device=x.device)
             ).view(bsz, seqlen, 4096)
