@@ -35,13 +35,17 @@ def apply_rotary_pos_emb(q, k, cos, sin):
     k_embed = (k * cos) + (rotate_every_two(k) * sin)
     return q_embed.to(q.dtype), k_embed.to(k.dtype)
 
-# import from llama.py
+# from llama/model.py
 def rotate_every_two(x):
     x_even = x[..., ::2]
     x_odd  = x[..., 1::2]
     return torch.stack((-x_odd, x_even), dim=-1).reshape_as(x)
 
 def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, cos, sin):
+    # DEBUG PRINT
+    if debug:
+        print("----------------------------- python begin -----------------------------")
+    
     residual = torch.zeros(hidden.shape).to(0).half()
     flashinfer.fused_add_rmsnorm(hidden, residual, rms_input_weight, eps)
     residual = hidden
@@ -49,18 +53,49 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
     q = qkv_new[0].view(1, 32, head_dim)
     k_new = qkv_new[1].view(1, 32, head_dim)
     v_new = qkv_new[2].view(1, 32, head_dim)
-    # head_id = 0
+
+    # DEBUG PRINT
+    if debug: 
+        print("before RoPE")
+        print(f"q, head_id = {print_head}: first 8, last 8")
+        print(f"{q[0, print_head, 0: 8]}")
+        print(f"{q[0, print_head, 120: 128]}")
+        print(f"k_new, head_id = {print_head}: first 8, last 8")
+        print(f"{k_new[0, print_head, 0: 8]}")
+        print(f"{k_new[0, print_head, 120: 128]}")
+
     q, k_new = apply_rotary_pos_emb(q, k_new, cos, sin)  # RoPE need debug
+    
+    # DEBUG PRINT
+    if debug: 
+        print("after RoPE")
+        print(f"q, head_id = {print_head}: first 8, last 8")
+        print(f"{q[0, print_head, 0: 8]}")
+        print(f"{q[0, print_head, 120: 128]}")
+        print(f"k_new, head_id = {print_head}: first 8, last 8")
+        print(f"{k_new[0, print_head, 0: 8]}")
+        print(f"{k_new[0, print_head, 120: 128]}")
+
     q = q.reshape(32, head_dim)
     k = torch.cat((kv_cache[0], k_new), dim=0) 
     v = torch.cat((kv_cache[1], v_new), dim=0)
     o = flashinfer.single_decode_with_kv_cache(
         q, k, v, "NHD", "NONE", use_tensor_cores=False
     )
+    if debug:
+        print("attn output O")
+        print(f"o, head_id = {print_head}, o")
+        print(f"{o[print_head, 0: 128]}")
     o = o_proj(o.view(1, 32 * head_dim))
+    if debug:
+        print("final output o")
+        print(o[0, 0:8])
+        print(o[0, 4088:4096])
     # flashinfer.fused_add_rmsnorm(o, residual, rms_attn_weight, eps)
     # o_ffn = F.relu(gate_proj(o)) * up_proj(o)
     # o = down_proj(o_ffn)
+    if debug:
+        print("-----------------------------  python end  -----------------------------")
     return o.detach()
 
 # without ' * 0.1', the outputs of tilefusion and python both will be 'nan'
@@ -68,6 +103,7 @@ def generate_random_weights(shape):
     return (torch.randn(shape) * 0.1).to(0).half()
 
 def test_llama_decode_e2e():
+    print(f"seqlen: {seqlen}")
     # Generate random weights
     input_tensor = generate_random_weights((1, hidden_size)).to(0).half()
     weight_qkv = generate_random_weights((3 * hidden_size, num_heads * head_dim)).to(0).half()
@@ -110,31 +146,6 @@ def test_llama_decode_e2e():
             sin                    
         ))
 
-
-    # for i in range(5):
-        # tmp = llama_decoder_layer(
-                # input_tensor,          
-                # weight_qkv,                          
-                # weight_o,              
-                # kv_cache_full[0],
-                # kv_cache_full[1],           
-                # gate_up_proj_weight_fuse,      
-                # down_proj_weight_fuse,      
-                # rms_input_weight,      
-                # rms_attn_weight,       
-                # cos,                   
-                # sin                    
-            # )
-        # if not torch.equal(tmp, o):
-            # print(tmp)
-            # same = False
-# 
-    # if same:
-        # print("Kernel outputs match.")
-    # else:
-        # print("Kernel outputs differ.")
-        # max_error = (tmp - o).abs().max()
-        # print(f"Max error between outputs: {max_error.item()}") 
     eps = 1e-6
     rms_input_weight = rms_input_weight.reshape((hidden_size,))
     rms_attn_weight = rms_attn_weight.reshape((hidden_size,))
@@ -161,25 +172,35 @@ def test_llama_decode_e2e():
     o_gt = llama_decode(input_tensor, rms_input_weight, rms_attn_weight, eps, kv_cache_gt, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, cos, sin)
     nvtx.range_pop()
 
-    max_error_overall = 0
-    count_of_large_error = 0
+    print(o_gt.shape)
+    print("o_gt.abs.mean():", o_gt.abs().mean().item())
+    print("Ours[..., 0: 128]", o[0][..., 0:128])
+    print("Ref[..., 0: 128]", o_gt[..., 0:128])
+    max_error_list = []
+    mse_list = []
+    mae_list = []
     for i in range(test_run):
-        # mae = (o[i] - o_gt).abs().mean()
-        # print("Mean Absolute Error (MAE):", mae.item())
+        diff = (o[i] - o_gt).abs()
+        mae = diff.mean()
+        mae_list.append(mae)
 
-        # mse = ((o[i] - o_gt) ** 2).mean()
-        # print("Mean Squared Error (MSE):", mse.item())
+        mse = (diff ** 2).mean()
+        mse_list.append(mse)
 
-        max_error = (o[i] - o_gt).abs().max()
-        # print("Max Error:", max_error.item())
-        max_error_overall = max(max_error, max_error_overall)
-        if (max_error.item() > 0.125):
-            count_of_large_error += 1
-    
-    print("Max Error Overall:", max_error_overall.item())
-    print("Count of errors > 0.125:", count_of_large_error)
-    print(o[0])
-    print(o_gt.shape, o_gt)
+        max_error = diff.max()
+        max_error_list.append(max_error)
+
+    print(f"Max Error in MSE of {test_run} runs", max(mse_list).item())
+    print(f"Min Error in MSE of {test_run} runs", min(mse_list).item())
+    print(f"Max Error in MAE of {test_run} runs", max(mae_list).item())
+    print(f"Min Error in MAE of {test_run} runs", min(mae_list).item())
+    print(f"Max Error in Max Errors of {test_run} runs", max(max_error_list).item())
+    print(f"Min Error in Max Errors of {test_run} runs", min(max_error_list).item())
+    print(f"Count of Max Errors > 0.1: {sum(e.item() > 0.1 for e in max_error_list)}")
+
+    max_error_value = max(max_error_list).item()
+    max_error_index = max_error_list.index(max(max_error_list))
+    print(f"Max Error occurs at run {max_error_index}, value: {max_error_value}")
 
 if __name__ == "__main__":
     test_llama_decode_e2e()
