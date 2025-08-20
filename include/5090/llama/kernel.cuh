@@ -78,18 +78,23 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     // float* reduction  = reinterpret_cast<float*>(shmem_base + DIM_PER_BLOCK * sizeof(half));
     // half* weight      = reinterpret_cast<half*>((uintptr_t)(shmem_base + DIM_PER_BLOCK * sizeof(half) + 2 * DIM_BLOCK_REDUCE * sizeof(float)) + 127 & ~127);
     // half* local_qkv   = reinterpret_cast<half*>((uintptr_t)(weight + 2 * TMA_LOAD_ONCE * MAX_SMEM_DIM) + 127 & ~127);
+    // extern __shared__ uint8_t shmem_base[];
+    // half* input_shmem = reinterpret_cast<half*>(((uintptr_t)shmem_base + 15) & ~uintptr_t(15));
+    // float* reduction  = reinterpret_cast<float*>(input_shmem + DIM_PER_BLOCK);
+    // half* weight = reinterpret_cast<half*>(((uintptr_t)(reduction + DIM_BLOCK_REDUCE) + 127) & ~uintptr_t(127));
+    // half* local_qkv = reinterpret_cast<half*>(((uintptr_t)(weight + 2 * TMA_LOAD_ONCE * MAX_SMEM_DIM) + 15) & ~uintptr_t(15));
     extern __shared__ uint8_t shmem_base[];
-    half* input_shmem = reinterpret_cast<half*>(((uintptr_t)shmem_base + 15) & ~uintptr_t(15));
-    float* reduction  = reinterpret_cast<float*>(input_shmem + DIM_PER_BLOCK);
-    half* weight = reinterpret_cast<half*>(((uintptr_t)(reduction + 2 * DIM_BLOCK_REDUCE) + 127) & ~uintptr_t(127));
-    half* local_qkv = reinterpret_cast<half*>(((uintptr_t)(weight + 2 * TMA_LOAD_ONCE * MAX_SMEM_DIM) + 15) & ~uintptr_t(15));
+    half* weight = reinterpret_cast<half*>((uintptr_t)(shmem_base) + 127 & ~127);
+    half* local_qkv = weight + 2 * TMA_LOAD_ONCE * MAX_SMEM_DIM;
+    half* input_shmem = local_qkv + 3 * HEAD_DIM;
+    float* reduction = reinterpret_cast<float*>(input_shmem + DIM_PER_BLOCK);
 
     __shared__ float cluster_local_sum, cluster_local_max;
 
     // Init registers
     float local_sum = 0.0, eps = 1e-6, rms_rcp = 0.0, tmp = 0.0, local_max = 0.0, pre_max = 0.0, scale = 0.0, softmax_scale = __frsqrt_rn(HEAD_DIM) * 1.44269504088896340736f; // log_2 e
     half __align__(16) reg_input[NUM_PER_THREAD], reg_weight[NUM_PER_THREAD];
-    float __align__(16) reg_reduce[NUM_PER_THREAD];
+    float reg_reduce[NUM_PER_THREAD];
     float* dst_shmem;
     // half2 q_rope, q_rope_1, k_rope, k_rope_1;
     // float2 cos_reg, sin_reg;
@@ -164,7 +169,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         }
         cluster.sync();
     }
-    rms_rcp = __frsqrt_rn(cluster_local_sum / HIDDEN_DIM + eps);
+    rms_rcp = __frsqrt_rn(cluster_local_sum / HIDDEN_DIM);
     for (int d = tid * 8; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 8) { 
         *(uint4*)(&reg_weight[0]) = *(uint4*)(&w_rms_input[cluster_block_st_id + d]);
         for (int i = 0; i < 8; i++) {
