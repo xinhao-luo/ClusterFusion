@@ -169,7 +169,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         }
         cluster.sync();
     }
-    rms_rcp = __frsqrt_rn(cluster_local_sum / HIDDEN_DIM);
+    rms_rcp = __frsqrt_rn(cluster_local_sum / HIDDEN_DIM + eps);
     for (int d = tid * 8; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 8) { 
         *(uint4*)(&reg_weight[0]) = *(uint4*)(&w_rms_input[cluster_block_st_id + d]);
         for (int i = 0; i < 8; i++) {
