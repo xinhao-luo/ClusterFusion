@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import flashinfer
 import torch.cuda.nvtx as nvtx
 from clusterfusion import llama_decoder_layer
@@ -13,7 +12,6 @@ ffn_dim_gt = 11008
 ffn_dim_fuse = 12288    
 
 torch.manual_seed(42)
-torch.set_printoptions(precision=4, sci_mode=False)
 
 # Enable Debug print
 debug = 0
@@ -33,15 +31,15 @@ def initialize_rope_embeddings(HEAD_DIM):
 def apply_rotary_pos_emb(q, k, cos, sin):
     cos = cos.unsqueeze(1)
     sin = sin.unsqueeze(1)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
+    q_embed = (q * cos) + (rotate_every_two(q) * sin)
+    k_embed = (k * cos) + (rotate_every_two(k) * sin)
     return q_embed.to(q.dtype), k_embed.to(k.dtype)
 
 # import from llama.py
-def rotate_half(x):
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
+def rotate_every_two(x):
+    x_even = x[..., ::2]
+    x_odd  = x[..., 1::2]
+    return torch.stack((-x_odd, x_even), dim=-1).reshape_as(x)
 
 def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, cos, sin):
     residual = torch.zeros(hidden.shape).to(0).half()
@@ -51,7 +49,7 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
     q = qkv_new[0].view(1, 32, head_dim)
     k_new = qkv_new[1].view(1, 32, head_dim)
     v_new = qkv_new[2].view(1, 32, head_dim)
-    head_id = 0
+    # head_id = 0
     q, k_new = apply_rotary_pos_emb(q, k_new, cos, sin)  # RoPE need debug
     q = q.reshape(32, head_dim)
     k = torch.cat((kv_cache[0], k_new), dim=0) 
@@ -67,7 +65,7 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
 
 # without ' * 0.1', the outputs of tilefusion and python both will be 'nan'
 def generate_random_weights(shape):
-    return (torch.randn(shape) * 0.2).to(0).half()
+    return (torch.randn(shape) * 0.1).to(0).half()
 
 def test_llama_decode_e2e():
     # Generate random weights
@@ -157,7 +155,7 @@ def test_llama_decode_e2e():
     # Split kv_cache_full into two parts for kv_cache_gt initialization
     kv_cache_k = kv_cache_full[0].view(seqlen, num_heads, head_dim)
     kv_cache_v = kv_cache_full[1].view(seqlen, num_heads, head_dim)
-    kv_cache_gt = torch.cat([kv_cache_k[:seqlen], kv_cache_v[:seqlen]], dim=0).view(2, seqlen, num_heads, head_dim)
+    kv_cache_gt = torch.cat([kv_cache_k[:seqlen-1], kv_cache_v[:seqlen-1]], dim=0).view(2, seqlen-1, num_heads, head_dim)
     
     nvtx.range_push("llama_decode")
     o_gt = llama_decode(input_tensor, rms_input_weight, rms_attn_weight, eps, kv_cache_gt, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, cos, sin)
