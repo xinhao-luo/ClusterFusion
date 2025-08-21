@@ -34,6 +34,7 @@ else:
     raise RuntimeError(f"Unsupported arch: {_arch}")
 
 module_name = "_clusterfusion"
+cutlass_path = "/sgl-workspace/clusterfusion/cutlass/include"
 
 setup(
     name="clusterfusion",
@@ -43,13 +44,14 @@ setup(
             name="clusterfusion._clusterfusion",
             sources=sources,
             extra_compile_args={
-                "cxx": ["-O3", "-std=c++17", f"-D{_macro}"],
+                "cxx": ["-O3", "-std=c++17", f"-D{_macro}", f"-I{cutlass_path}"],
                 "nvcc": [
                     "-O3",
                     "-std=c++17",
                     gencode,
                     "-lcuda",
                     f"-D{_macro}",
+                    f"-I{cutlass_path}",
                 ],
             },
             libraries=["cuda", "cudart"],
