@@ -78,21 +78,21 @@ __device__ __forceinline__ void __cluster_dims__(cluster_size, 1, 1) dsm_ring_al
         }
         return;
     } else {
+        if (tid == 0) {
+            asm volatile (
+                "mbarrier.init.shared::cta.b64 [%0], %1;"
+                :
+                : "r"(barrier), "r"(1)
+            );
+        }
+        cluster.sync();
         for (int i = 1; i < cluster.num_blocks() - 1; i++) {
             if (tid == 0) {
-                asm volatile (
-                    "mbarrier.init.shared::cta.b64 [%0], %1;"
-                    :
-                    : "r"(barrier), "r"(1)
-                );
                 asm volatile (
                     "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;"
                     :
                     : "r"(barrier), "r"(size)
                 );
-            }
-            cluster.sync();
-            if (tid == 0) {
                 dst_cta = (cluster_block_id + i) % cluster.num_blocks();
                 asm volatile (
                     "mapa.shared::cluster.u32 %0, %1, %2;\n"
@@ -121,7 +121,7 @@ __device__ __forceinline__ void __cluster_dims__(cluster_size, 1, 1) dsm_ring_al
                 "DONE:\n"
                 "}\n"
                 :: "r"(barrier),
-                "r"(0)
+                "r"(i ^ 1)
             );
 
             // Local reduce-add
