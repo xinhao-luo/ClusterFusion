@@ -1,7 +1,7 @@
 #include "kernel.cuh"
 #include <torch/extension.h>
 
-torch::Tensor llama_decoder_layer_sm120(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> llama_decoder_layer_sm120(
     torch::Tensor input,
     torch::Tensor weight_qkv,
     torch::Tensor weight_o,
@@ -18,7 +18,11 @@ torch::Tensor llama_decoder_layer_sm120(
     cudaFuncSetAttribute(LlamaDecoderLayerKernel, cudaFuncAttributeMaxDynamicSharedMemorySize, max_shmem_size);
     auto options = torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA, 0);
     torch::Tensor o = torch::full({1, HIDDEN_DIM}, 0, options);
+    torch::Tensor k = torch::full({1, HEAD_NUM, HEAD_DIM}, 0, options);
+    torch::Tensor v = torch::full({1, HEAD_NUM, HEAD_DIM}, 0, options);
     half* o_ptr = reinterpret_cast<half*>(o.data_ptr<at::Half>());
+    half* k_ptr = reinterpret_cast<half*>(k.data_ptr<at::Half>());
+    half* v_ptr = reinterpret_cast<half*>(v.data_ptr<at::Half>());
 
     half* input_ptr = reinterpret_cast<half*>(input.data_ptr<at::Half>());
     half* weight_qkv_ptr = reinterpret_cast<half*>(weight_qkv.data_ptr<at::Half>());
@@ -57,7 +61,7 @@ torch::Tensor llama_decoder_layer_sm120(
         CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
     );
 
-    uint64_t size_k_cache[rank] = {HIDDEN_DIM, SEQ_LEN - 1};
+    uint64_t size_k_cache[rank] = {HIDDEN_DIM, SEQ_LEN};
     uint64_t stride_k_cache[rank - 1] = {HIDDEN_DIM * sizeof(half)};
     uint32_t box_size_k_cache[rank] = {HEAD_DIM, TMA_LOAD_ONCE / 2};
     uint32_t elem_stride_k_cache[rank] = {1, 1};
@@ -77,7 +81,7 @@ torch::Tensor llama_decoder_layer_sm120(
         CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
     );
 
-    uint64_t size_v_cache[rank] = {HIDDEN_DIM, SEQ_LEN - 1};
+    uint64_t size_v_cache[rank] = {HIDDEN_DIM, SEQ_LEN};
     uint64_t stride_v_cache[rank - 1] = {HIDDEN_DIM * sizeof(half)};
     uint32_t box_size_v_cache[rank] = {HEAD_DIM, TMA_LOAD_ONCE / 2};
     uint32_t elem_stride_v_cache[rank] = {1, 1};
@@ -123,6 +127,8 @@ torch::Tensor llama_decoder_layer_sm120(
     cudaDeviceSynchronize();
     LlamaDecoderLayerKernel<<<grid, block, max_shmem_size>>>(
         o_ptr,
+        k_ptr,
+        v_ptr,
         input_ptr,
         rms_input_weight_ptr,
         cos_ptr,
@@ -137,5 +143,5 @@ torch::Tensor llama_decoder_layer_sm120(
         KV_DIM_PER_BLOCK
     );
     cudaDeviceSynchronize();
-    return o;
+    return std::make_tuple(o, k, v);
 }

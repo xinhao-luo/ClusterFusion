@@ -20,6 +20,8 @@ __forceinline__ __device__ float ptx_exp2(float x) {
 
 __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     half* output, // 1 * hidden_dim
+    half* k_output,
+    half* v_output,
     half* input,  // 1 * hidden_dim
     half* w_rms_input,// hidden_dim
     float* cos,       // head_dim
@@ -402,6 +404,12 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg + k_rope_1 * sin_reg);
     }
 
+    // Output qk
+    block.sync();
+    k_output[head_id * HEAD_DIM + tid] = local_qkv[HEAD_DIM + tid];
+    v_output[head_id * HEAD_DIM + tid] = local_qkv[2 * HEAD_DIM + tid];
+    block.sync();
+
 
 #ifdef DEBUG
     // DEBUG PRINT
@@ -426,11 +434,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         printf("\n");
     }
 #endif
-
-    // Update KV Cache
-    block.sync();
-    k_cache[(SEQ_LEN - 1) * HIDDEN_DIM + cluster_head_idx + tid] = local_qkv[HEAD_DIM + tid];
-    v_cache[(SEQ_LEN - 1) * HIDDEN_DIM + cluster_head_idx + tid] = local_qkv[2 * HEAD_DIM + tid];
 
     // Compute flash-decoding
     local_sum = 0.0f;

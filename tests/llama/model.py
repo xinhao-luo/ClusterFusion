@@ -342,10 +342,10 @@ class Attention(nn.Module):
         bsz, seqlen, _ = x.shape
         if self.use_cluster_fusion and mask is None:
 
-            kv_cache_k = self.cache_k[:bsz, :start_pos + seqlen].view(-1, self.n_local_kv_heads * self.head_dim)
-            kv_cache_v = self.cache_v[:bsz, :start_pos + seqlen].view(-1, self.n_local_kv_heads * self.head_dim)
+            kv_cache_k = self.cache_k[:bsz, :start_pos].view(-1, self.n_local_kv_heads * self.head_dim)
+            kv_cache_v = self.cache_v[:bsz, :start_pos].view(-1, self.n_local_kv_heads * self.head_dim)
         
-            return llama_decoder_layer(
+            output, xk, xv = llama_decoder_layer(
                 x,          
                 self.weight_qkv,                          
                 self.weight_o,              
@@ -354,7 +354,14 @@ class Attention(nn.Module):
                 rms_input_weight,      
                 self.rotary_cos[start_pos:start_pos+seqlen].to(device=x.device),
                 self.rotary_sin[start_pos:start_pos+seqlen].to(device=x.device)
-            ).view(bsz, seqlen, 4096)
+            )
+            output = output.view(bsz, seqlen, 4096)
+
+            # Update KV Cache
+            self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+            self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+
+            return output
         else:
             xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
