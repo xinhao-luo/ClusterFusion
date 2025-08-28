@@ -29,11 +29,18 @@ def initialize_rope_embeddings(HEAD_DIM):
     return h_cos, h_sin
 
 # import from llama.py
-def apply_rotary_pos_emb(q, k, cos, sin):
+def apply_GPT_J_style_rotary_pos_emb(q, k, cos, sin):
     cos = cos.unsqueeze(1)
     sin = sin.unsqueeze(1)
     q_embed = (q * cos) + (rotate_every_two(q) * sin)
     k_embed = (k * cos) + (rotate_every_two(k) * sin)
+    return q_embed.to(q.dtype), k_embed.to(k.dtype)
+
+def apply_neox_style_rotary_pos_emb(q, k, cos, sin):
+    cos = cos.unsqueeze(1)
+    sin = sin.unsqueeze(1)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed.to(q.dtype), k_embed.to(k.dtype)
 
 # from llama/model.py
@@ -72,7 +79,8 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
         print(f"{k_new[0, print_head, 0: 8]}")
         print(f"{k_new[0, print_head, 120: 128]}")
 
-    q, k_new = apply_rotary_pos_emb(q, k_new, cos, sin)  # RoPE need debug
+    q, k_new = apply_GPT_J_style_rotary_pos_emb(q, k_new, cos, sin)
+    #q, k_new = apply_neox_style_rotary_pos_emb(q, k_new, cos, sin)
 
     # DEBUG PRINT
     if debug: 

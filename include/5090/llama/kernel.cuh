@@ -12,6 +12,10 @@ namespace cg = cooperative_groups;
 #define PRINT_HEAD 1
 #endif
 
+// Neox-style RoPE for sglang.
+// If commented, we will use GPT-J style RoPE for tests/models/llama.py
+// #define NEOX_STYLE_ROPE
+
 __forceinline__ __device__ float ptx_exp2(float x) {
   float y;
   asm volatile("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
@@ -344,50 +348,28 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     }
 #endif
 
-    // Compute RoPE
-    // if (tid < HEAD_DIM / 2) {
-        // q_rope = *(half2*)(&local_qkv[tid * 2]);
-        // k_rope = *(half2*)(&local_qkv[HEAD_DIM + tid * 2]);
-        // cos_reg = {cos[tid * 2], cos[tid * 2 + 1]};
-        // sin_reg = {sin[tid * 2], sin[tid * 2 + 1]};
-        // if (tid * 2 < HEAD_DIM / 2) {
-            // q_rope_1 = *(half2*)(&local_qkv[HEAD_DIM / 2 + tid * 2]);
-            // k_rope_1 = *(half2*)(&local_qkv[HEAD_DIM + HEAD_DIM / 2 + tid * 2]);
-        // } else {
-            // q_rope_1 = *(half2*)(&local_qkv[tid * 2 - HEAD_DIM / 2]);
-            // k_rope_1 = *(half2*)(&local_qkv[HEAD_DIM + tid * 2 - HEAD_DIM / 2]);
-        // }
-        // if (tid * 2 < HEAD_DIM / 2) {
-            // *(half2*)(&local_qkv[tid * 2]) = __hadd2(__hmul2(q_rope, __float22half2_rn(cos_reg)), __hmul2(__hneg2(q_rope_1), __float22half2_rn(sin_reg)));
-            // *(half2*)(&local_qkv[HEAD_DIM + tid * 2]) = __hadd2(__hmul2(k_rope, __float22half2_rn(cos_reg)), __hmul2(__hneg2(k_rope_1), __float22half2_rn(sin_reg)));
-        // } else {
-            // *(half2*)(&local_qkv[tid * 2]) = __hadd2(__hmul2(q_rope, __float22half2_rn(cos_reg)), __hmul2(q_rope_1, __float22half2_rn(sin_reg)));
-            // *(half2*)(&local_qkv[HEAD_DIM + tid * 2]) = __hadd2(__hmul2(k_rope, __float22half2_rn(cos_reg)), __hmul2(k_rope_1, __float22half2_rn(sin_reg)));
-        // }
-    // }
-
-
     q_rope = __half2float(local_qkv[tid]);
     k_rope = __half2float(local_qkv[HEAD_DIM + tid]);
     cos_reg = cos[tid];
     sin_reg = sin[tid];
-    // NOTE: Original RoPE
-    // if (tid < HEAD_DIM / 2) {
-        // q_rope_1 = __half2float(local_qkv[HEAD_DIM / 2 + tid]);
-        // k_rope_1 = __half2float(local_qkv[HEAD_DIM + HEAD_DIM / 2 + tid]);
-    // } else {
-        // q_rope_1 = __half2float(local_qkv[tid - HEAD_DIM / 2]);
-        // k_rope_1 = __half2float(local_qkv[HEAD_DIM + tid - HEAD_DIM / 2]);
-    // }
-    // block.sync();
-    // if (tid < HEAD_DIM / 2) {
-        // local_qkv[tid] = __float2half(q_rope * cos_reg - q_rope_1 * sin_reg);
-        // local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg - k_rope_1 * sin_reg);
-    // } else {
-        // local_qkv[tid] = __float2half(q_rope * cos_reg + q_rope_1 * sin_reg);
-        // local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg + k_rope_1 * sin_reg);
-    // }
-    // NOTE: RoPE from llama/model.py
+#ifdef NEOX_STYLE_ROPE
+    if (tid < HEAD_DIM / 2) {
+        q_rope_1 = __half2float(local_qkv[HEAD_DIM / 2 + tid]);
+        k_rope_1 = __half2float(local_qkv[HEAD_DIM + HEAD_DIM / 2 + tid]);
+    } else {
+        q_rope_1 = __half2float(local_qkv[tid - HEAD_DIM / 2]);
+        k_rope_1 = __half2float(local_qkv[HEAD_DIM + tid - HEAD_DIM / 2]);
+    }
+    block.sync();
+    if (tid < HEAD_DIM / 2) {
+        local_qkv[tid] = __float2half(q_rope * cos_reg - q_rope_1 * sin_reg);
+        local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg - k_rope_1 * sin_reg);
+    } else {
+        local_qkv[tid] = __float2half(q_rope * cos_reg + q_rope_1 * sin_reg);
+        local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg + k_rope_1 * sin_reg);
+    }
+#else
+    // NOTE: RoPE from llama/model.py. GPT-J stype RoPE
     if (tid % 2 == 0) {
         q_rope_1 = __half2float(local_qkv[tid + 1]);
         k_rope_1 = __half2float(local_qkv[HEAD_DIM + (tid + 1)]);
@@ -403,6 +385,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         local_qkv[tid] = __float2half(q_rope * cos_reg + q_rope_1 * sin_reg);
         local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg + k_rope_1 * sin_reg);
     }
+#endif
 
     // Output qk
     block.sync();
