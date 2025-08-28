@@ -14,7 +14,7 @@ namespace cg = cooperative_groups;
 
 // Neox-style RoPE for sglang.
 // If commented, we will use GPT-J style RoPE for tests/models/llama.py
-// #define NEOX_STYLE_ROPE
+#define NEOX_STYLE_ROPE
 
 __forceinline__ __device__ float ptx_exp2(float x) {
   float y;

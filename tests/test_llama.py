@@ -79,8 +79,8 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
         print(f"{k_new[0, print_head, 0: 8]}")
         print(f"{k_new[0, print_head, 120: 128]}")
 
-    q, k_new = apply_GPT_J_style_rotary_pos_emb(q, k_new, cos, sin)
-    #q, k_new = apply_neox_style_rotary_pos_emb(q, k_new, cos, sin)
+    #q, k_new = apply_GPT_J_style_rotary_pos_emb(q, k_new, cos, sin)
+    q, k_new = apply_neox_style_rotary_pos_emb(q, k_new, cos, sin)
 
     # DEBUG PRINT
     if debug: 
