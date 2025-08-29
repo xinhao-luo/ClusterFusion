@@ -14,7 +14,7 @@ namespace cg = cooperative_groups;
 
 // Neox-style RoPE for sglang.
 // If commented, we will use GPT-J style RoPE for tests/models/llama.py
-#define NEOX_STYLE_ROPE
+// #define NEOX_STYLE_ROPE
 
 __forceinline__ __device__ float ptx_exp2(float x) {
   float y;
@@ -387,11 +387,13 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     }
 #endif
 
-    // Output qk
-    block.sync();
-    k_output[head_id * HEAD_DIM + tid] = local_qkv[HEAD_DIM + tid];
-    v_output[head_id * HEAD_DIM + tid] = local_qkv[2 * HEAD_DIM + tid];
-    block.sync();
+    // Output kv
+    cluster.sync();
+    if (cluster_block_id == 0) {
+        k_output[head_id * HEAD_DIM + tid] = local_qkv[HEAD_DIM + tid];
+        v_output[head_id * HEAD_DIM + tid] = local_qkv[2 * HEAD_DIM + tid];
+    }
+    cluster.sync();
 
 
 #ifdef DEBUG
