@@ -24,7 +24,6 @@ __forceinline__ __device__ float ptx_exp2(float x) {
 
 __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     half* output, // 1 * hidden_dim
-    half* normed_output,
     half* k_output,
     half* v_output,
     half* input,  // 1 * hidden_dim
@@ -164,11 +163,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         *(uint4*)(&input_shmem[d]) = *(uint4*)(&reg_input[0]);
     }
     block.sync();
-
-    // tmp: output normed
-    if (head_id == 0) {
-        *(uint4*)(&normed_output[cluster_block_st_id + tid * 8]) = *(uint4*)(&input_shmem[tid * 8]);
-    }
 
     // Compute input @ w_q
     // Preload weight_q

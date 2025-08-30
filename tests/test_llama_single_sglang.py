@@ -63,7 +63,6 @@ def llama_decode(hidden, residual, rms_input_weight, rms_attn_weight, eps, kv_ca
 
     flashinfer.fused_add_rmsnorm(hidden, residual, rms_input_weight, eps)
     residual = hidden
-    print("normed ref", hidden[..., 0: 128])
     qkv_new = qkv_proj(hidden).view(3, 32, head_dim)
     q = qkv_new[0].view(1, 32, head_dim)
     k_new = qkv_new[1].view(1, 32, head_dim)
@@ -71,6 +70,7 @@ def llama_decode(hidden, residual, rms_input_weight, rms_attn_weight, eps, kv_ca
 
     # DEBUG PRINT
     if debug: 
+        print("normed ref", hidden[..., 0: 128])
         print("before RoPE")
         print(f"q, head_id = {print_head}: first 8, last 8")
         print(f"{q[0, print_head, 0: 8]}")
@@ -150,7 +150,7 @@ def test_llama_decode_e2e():
     o = []
     for i in range(test_run):
         tmp_residual = residual.clone()
-        output, _, normed, k, v = llama_decoder_layer_sglang(
+        output, _, k, v = llama_decoder_layer_sglang(
             input_tensor,          
             tmp_residual,
             weight_qkv,                          
@@ -163,7 +163,6 @@ def test_llama_decode_e2e():
             sin                    
         )
         o.append(output)
-    print("normed output", normed[..., 0: 128])
 
     eps = 1e-6
     rms_input_weight = rms_input_weight.reshape((hidden_size,))
