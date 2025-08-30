@@ -46,6 +46,18 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> llama_decoder_layer_sm12
     torch::Tensor sin
 );
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_decoder_layer_sglang_sm120(
+    torch::Tensor input,
+    torch::Tensor residual,
+    torch::Tensor weight_qkv,
+    torch::Tensor weight_o,
+    torch::Tensor k_cache,
+    torch::Tensor v_cache,
+    torch::Tensor rms_input_weight,
+    torch::Tensor cos,
+    torch::Tensor sin
+);
+
 #ifdef COMPILE_SM90
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("llama_decoder_layer", &llama_decoder_layer, "");
@@ -56,5 +68,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #ifdef COMPILE_SM120
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("llama_decoder_layer", &llama_decoder_layer_sm120, "");
+    m.def("llama_decoder_layer_sglang", &llama_decoder_layer_sglang_sm120, "");
 }
 #endif

@@ -20,6 +20,7 @@ if _arch == "sm120a":
     sources = [
         "include/pybind.cpp",
         "include/5090/llama/llama_kernel_dispatch.cu",
+        "include/5090/llama/llama_kernel_sglang_dispatch.cu",
     ]
     gencode = "-gencode=arch=compute_120a,code=sm_120a"
 elif _arch == "sm90a":
