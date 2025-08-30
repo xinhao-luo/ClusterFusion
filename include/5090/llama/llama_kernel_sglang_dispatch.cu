@@ -109,7 +109,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 
     uint64_t size_weight_o[rank] = {HIDDEN_DIM, HIDDEN_DIM};
     uint64_t stride_weight_o[rank - 1] = {HIDDEN_DIM * sizeof(half)};
-    uint32_t box_size_weight_o[rank] = {TMA_LOAD_ONCE, HEAD_DIM};
+    uint32_t box_size_weight_o[rank] = {HEAD_DIM, TMA_LOAD_ONCE};
     uint32_t elem_stride_weight_o[rank] = {1, 1};
     CUresult res_weight_o = cuTensorMapEncodeTiled(
         &tensor_map_weight_o,                

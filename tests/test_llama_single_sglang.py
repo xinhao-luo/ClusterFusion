@@ -176,7 +176,7 @@ def test_llama_decode_e2e():
     up_proj = nn.Linear(hidden_size, ffn_dim_gt, bias=False).to(0).half()
     down_proj = nn.Linear(ffn_dim_gt, hidden_size, bias=False).to(0).half()
     qkv_proj.weight.data = weight_qkv.contiguous().view(qkv_proj.weight.data.shape)
-    o_proj.weight.data = weight_o.T.contiguous().view(o_proj.weight.data.shape)
+    o_proj.weight.data = weight_o.contiguous().view(o_proj.weight.data.shape)
     gate_proj.weight.data = gate_up_proj_weight_gt[:hidden_size, :].T.contiguous().view(gate_proj.weight.data.shape)
     up_proj.weight.data = gate_up_proj_weight_gt[hidden_size:, :].T.contiguous().view(up_proj.weight.data.shape)
     down_proj.weight.data = down_proj_weight_gt.T.contiguous().view(down_proj.weight.data.shape)
