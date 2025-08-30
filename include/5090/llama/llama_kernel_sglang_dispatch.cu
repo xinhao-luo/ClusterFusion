@@ -1,7 +1,7 @@
 #include "kernel_sglang.cuh"
 #include <torch/extension.h>
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_decoder_layer_sglang_sm120(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_decoder_layer_sglang_sm120(
     torch::Tensor input,
     torch::Tensor residual,
     torch::Tensor weight_qkv,
@@ -9,6 +9,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
     torch::Tensor k_cache,
     torch::Tensor v_cache,
     torch::Tensor rms_input_weight,
+    float eps,
     torch::Tensor cos,
     torch::Tensor sin
 ) 
@@ -21,9 +22,11 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
     torch::Tensor o = torch::full({1, HIDDEN_DIM}, 0, options);
     torch::Tensor k = torch::full({1, HEAD_NUM, HEAD_DIM}, 0, options);
     torch::Tensor v = torch::full({1, HEAD_NUM, HEAD_DIM}, 0, options);
+    torch::Tensor normed = torch::full({1, HIDDEN_DIM}, 0, options);
     half* o_ptr = reinterpret_cast<half*>(o.data_ptr<at::Half>());
     half* k_ptr = reinterpret_cast<half*>(k.data_ptr<at::Half>());
     half* v_ptr = reinterpret_cast<half*>(v.data_ptr<at::Half>());
+    half* normed_ptr = reinterpret_cast<half*>(normed.data_ptr<at::Half>());
 
     half* input_ptr = reinterpret_cast<half*>(input.data_ptr<at::Half>());
     half* residual_ptr = reinterpret_cast<half*>(residual.data_ptr<at::Half>());
@@ -129,11 +132,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
     cudaDeviceSynchronize();
     LlamaDecoderLayerKernel<<<grid, block, max_shmem_size>>>(
         o_ptr,
+        normed_ptr,
         k_ptr,
         v_ptr,
         input_ptr,
         residual_ptr,
         rms_input_weight_ptr,
+        eps,
         cos_ptr,
         sin_ptr,
         k_cache_ptr,
@@ -146,5 +151,5 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
         KV_DIM_PER_BLOCK
     );
     cudaDeviceSynchronize();
-    return std::make_tuple(o, residual, k, v);
+    return std::make_tuple(o, residual, normed, k, v);
 }

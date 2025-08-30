@@ -24,11 +24,13 @@ __forceinline__ __device__ float ptx_exp2(float x) {
 
 __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     half* output, // 1 * hidden_dim
+    half* normed_output,
     half* k_output,
     half* v_output,
     half* input,  // 1 * hidden_dim
     half* residual,  // 1 * hidden_dim
     half* w_rms_input,// hidden_dim
+    float eps,
     float* cos,       // head_dim
     float* sin,       // head_dim
     half* k_cache,
@@ -74,7 +76,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     __shared__ float cluster_local_sum, cluster_local_max;
 
     // Init registers
-    float local_sum = 0.0, eps = 1e-6, rms_rcp = 0.0, tmp = 0.0, local_max = -CUDART_INF_F, pre_max = -CUDART_INF_F, scale = 0.0, softmax_scale = __frsqrt_rn(HEAD_DIM) * 1.44269504088896340736f;
+    float local_sum = 0.0, rms_rcp = 0.0, tmp = 0.0, local_max = -CUDART_INF_F, pre_max = -CUDART_INF_F, scale = 0.0, softmax_scale = __frsqrt_rn(HEAD_DIM) * 1.44269504088896340736f;
     half __align__(16) reg_input[NUM_PER_THREAD], reg_residual[NUM_PER_THREAD], reg_weight[NUM_PER_THREAD];
     float reg_reduce[NUM_PER_THREAD];
     float* dst_shmem;
@@ -162,6 +164,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         *(uint4*)(&input_shmem[d]) = *(uint4*)(&reg_input[0]);
     }
     block.sync();
+
+    // tmp: output normed
+    if (head_id == 0) {
+        *(uint4*)(&normed_output[cluster_block_st_id + tid * 8]) = *(uint4*)(&input_shmem[tid * 8]);
+    }
 
     // Compute input @ w_q
     // Preload weight_q

@@ -46,7 +46,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> llama_decoder_layer_sm12
     torch::Tensor sin
 );
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_decoder_layer_sglang_sm120(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_decoder_layer_sglang_sm120(
     torch::Tensor input,
     torch::Tensor residual,
     torch::Tensor weight_qkv,
@@ -54,6 +54,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
     torch::Tensor k_cache,
     torch::Tensor v_cache,
     torch::Tensor rms_input_weight,
+    float eps,
     torch::Tensor cos,
     torch::Tensor sin
 );
