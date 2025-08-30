@@ -123,7 +123,7 @@ def test_llama_decode_e2e():
     # Generate random weights
     input_tensor = generate_random_weights((1, hidden_size)).to(0).half()
     residual = generate_random_weights((1, hidden_size)).to(0).half()
-    weight_qkv = generate_random_weights((3 * hidden_size, num_heads * head_dim)).to(0).half()
+    weight_qkv = generate_random_weights((3 * num_heads * head_dim, hidden_size)).to(0).half()
     weight_o = generate_random_weights((num_heads * head_dim, hidden_size)).to(0).half()
     
     # For llama_decode
@@ -175,8 +175,7 @@ def test_llama_decode_e2e():
     gate_proj = nn.Linear(hidden_size, ffn_dim_gt, bias=False).to(0).half()
     up_proj = nn.Linear(hidden_size, ffn_dim_gt, bias=False).to(0).half()
     down_proj = nn.Linear(ffn_dim_gt, hidden_size, bias=False).to(0).half()
-    weight_qkv = weight_qkv.reshape(3, hidden_size, -1).transpose(0, 1).reshape(hidden_size, -1)
-    qkv_proj.weight.data = weight_qkv.T.contiguous().view(qkv_proj.weight.data.shape)
+    qkv_proj.weight.data = weight_qkv.contiguous().view(qkv_proj.weight.data.shape)
     o_proj.weight.data = weight_o.T.contiguous().view(o_proj.weight.data.shape)
     gate_proj.weight.data = gate_up_proj_weight_gt[:hidden_size, :].T.contiguous().view(gate_proj.weight.data.shape)
     up_proj.weight.data = gate_up_proj_weight_gt[hidden_size:, :].T.contiguous().view(up_proj.weight.data.shape)
