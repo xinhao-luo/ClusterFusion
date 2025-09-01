@@ -7,6 +7,7 @@ from . import env as env
 from .attention import cudnn_fmha_gen_module as cudnn_fmha_gen_module
 from .attention import gen_customize_batch_decode_module as gen_customize_batch_decode_module
 from .attention import gen_customize_batch_prefill_module as gen_customize_batch_prefill_module
+from .attention import get_batch_attention_uri as get_batch_attention_uri
 from .cubin_loader import setup_cubin_loader
 
 

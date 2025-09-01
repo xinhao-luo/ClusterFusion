@@ -5,26 +5,17 @@ from typing import Any, List, Literal, Optional, Tuple, Union, overload
 
 import torch
 
-from .cudnn import cudnn_batch_decode_with_kv_cache
 from .jit import (
-    cudnn_fmha_gen_module,
-    gen_batch_decode_mla_module,
     gen_batch_decode_module,
     gen_customize_batch_decode_module,
     gen_customize_batch_prefill_module,
-    gen_single_decode_module,
     get_batch_decode_uri,
     get_batch_prefill_uri,
-    get_single_decode_uri,
-    setup_cubin_loader,
-    setup_metainfo_loader,
-    trtllm_gen_fmha_module,
 )
 from .page import get_seq_lens
 from .prefill import (
     get_batch_prefill_jit_module,
     get_batch_prefill_module,
-    get_single_prefill_module,
 )
 from .utils import (
     MaskMode,
@@ -35,7 +26,6 @@ from .utils import (
     _check_pos_encoding_mode,
     _check_shape_dtype_device,
     _get_cache_alibi_slopes_buf,
-    _get_cache_buf,
     _get_range_buf,
     _unpack_paged_kv_cache,
     canonicalize_torch_dtype,
@@ -44,6 +34,178 @@ from .utils import (
     register_custom_op,
     register_fake_op,
 )
+
+@functools.cache
+def get_batch_decode_jit_module(module_name: str, jit_module: Any):
+    plan_func = jit_module.plan.default
+    run_func = jit_module.run.default
+
+    @register_custom_op(
+        f"flashinfer::{module_name}_run",
+        mutates_args=(
+            "float_workspace_buffer",
+            "int_workspace_buffer",
+            "paged_k_cache",
+            "paged_v_cache",
+            "o",
+            "maybe_lse",
+        ),
+    )
+    def run_batch_decode(
+        float_workspace_buffer: torch.Tensor,
+        int_workspace_buffer: torch.Tensor,
+        plan_info_vec: List[int],
+        q: torch.Tensor,
+        paged_k_cache: Optional[torch.Tensor],
+        paged_v_cache: Optional[torch.Tensor],
+        paged_kv_indptr: torch.Tensor,
+        paged_kv_indices: torch.Tensor,
+        paged_kv_last_page_len: torch.Tensor,
+        o: torch.Tensor,
+        maybe_lse: Optional[torch.Tensor],
+        kv_layout_code: int,
+        window_left: int,
+        enable_pdl: bool,
+        *args,
+    ) -> None:
+        run_func(
+            float_workspace_buffer,
+            int_workspace_buffer,
+            plan_info_vec,
+            q,
+            paged_k_cache,
+            paged_v_cache,
+            paged_kv_indptr,
+            paged_kv_indices,
+            paged_kv_last_page_len,
+            o,
+            maybe_lse,
+            kv_layout_code,
+            window_left,
+            enable_pdl,
+            *args,
+        )
+
+    @register_fake_op(f"flashinfer::{module_name}_run")
+    def _fake_run_batch_decode(
+        float_workspace_buffer: torch.Tensor,
+        int_workspace_buffer: torch.Tensor,
+        plan_info_vec: List[int],
+        q: torch.Tensor,
+        paged_k_cache: Optional[torch.Tensor],
+        paged_v_cache: Optional[torch.Tensor],
+        paged_kv_indptr: torch.Tensor,
+        paged_kv_indices: torch.Tensor,
+        paged_kv_last_page_len: torch.Tensor,
+        o: torch.Tensor,
+        maybe_lse: Optional[torch.Tensor],
+        kv_layout_code: int,
+        window_left: int,
+        enable_pdl: bool,
+        *args,
+    ) -> None:
+        pass
+
+    return SimpleNamespace(
+        plan=plan_func,
+        run=run_batch_decode,
+    )
+
+@functools.cache
+def get_batch_decode_module(*args):
+    uri = get_batch_decode_uri(*args)
+    mod = gen_batch_decode_module(*args).build_and_load()
+    plan_func = mod.plan.default
+    run_func = mod.run.default
+
+    # torch library for batch_decode_with_paged_kv_cache_run
+
+    @register_custom_op(
+        f"flashinfer::{uri}_run",
+        mutates_args=(
+            "float_workspace_buffer",
+            "int_workspace_buffer",
+            "paged_k_cache",
+            "paged_v_cache",
+            "o",
+            "maybe_lse",
+        ),
+    )
+    def run_batch_decode(
+        float_workspace_buffer: torch.Tensor,
+        int_workspace_buffer: torch.Tensor,
+        plan_info_vec: List[int],
+        q: torch.Tensor,
+        paged_k_cache: Optional[torch.Tensor],
+        paged_v_cache: Optional[torch.Tensor],
+        paged_kv_indptr: torch.Tensor,
+        paged_kv_indices: torch.Tensor,
+        paged_kv_last_page_len: torch.Tensor,
+        o: torch.Tensor,
+        maybe_lse: Optional[torch.Tensor],
+        kv_layout_code: int,
+        window_left: int,
+        enable_pdl: bool,
+        alibi_slopes: Optional[torch.Tensor],
+        logits_soft_cap: float,
+        sm_scale: float,
+        rope_scale: float,
+        rope_theta: float,
+    ) -> None:
+        run_func(
+            float_workspace_buffer,
+            int_workspace_buffer,
+            plan_info_vec,
+            q,
+            paged_k_cache,
+            paged_v_cache,
+            paged_kv_indptr,
+            paged_kv_indices,
+            paged_kv_last_page_len,
+            o,
+            maybe_lse,
+            kv_layout_code,
+            window_left,
+            enable_pdl,
+            alibi_slopes,
+            logits_soft_cap,
+            sm_scale,
+            1.0 / rope_scale,  # rope_rcp_scale
+            1.0 / rope_theta,  # rope_rcp_theta
+        )
+
+    @register_fake_op(f"flashinfer::{uri}_run")
+    def _fake_run_batch_decode(
+        float_workspace_buffer: torch.Tensor,
+        int_workspace_buffer: torch.Tensor,
+        plan_info_vec: List[int],
+        q: torch.Tensor,
+        paged_k_cache: Optional[torch.Tensor],
+        paged_v_cache: Optional[torch.Tensor],
+        paged_kv_indptr: torch.Tensor,
+        paged_kv_indices: torch.Tensor,
+        paged_kv_last_page_len: torch.Tensor,
+        o: torch.Tensor,
+        maybe_lse: Optional[torch.Tensor],
+        kv_layout_code: int,
+        window_left: int,
+        enable_pdl: bool,
+        alibi_slopes: Optional[torch.Tensor],
+        logits_soft_cap: float,
+        sm_scale: float,
+        rope_scale: float,
+        rope_theta: float,
+    ) -> None:
+        pass
+
+    # Register the module.
+    #
+    # Note that plan is not part of model logic. It should not be included in
+    # Cuda Graph or torch.compile. So, we don't provide a torch library for plan.
+    return SimpleNamespace(
+        plan=plan_func,
+        run=run_batch_decode,
+    )
 
 class BatchDecodeWithPagedKVCacheWrapper:
     r"""Wrapper class for decode attention with paged kv-cache (first proposed in
@@ -100,7 +262,7 @@ class BatchDecodeWithPagedKVCacheWrapper:
             Only needed when ``use_cuda_graph`` is ``True``.
 
         backend : str
-            The implementation backend, could be ``auto``/``fa2``/``trtllm-gen`` or ``clusterfusion``. Defaults to ``auto``.
+            The implementation backend, could be ``auto``/``fa2`` or ``clusterfusion``. Defaults to ``auto``.
             If set to ``auto``, the wrapper will automatically choose the backend based on the
             device architecture and kernel availability.
 
@@ -139,10 +301,8 @@ class BatchDecodeWithPagedKVCacheWrapper:
             device="cpu",
         )
         self._kv_lens_buffer: Optional[torch.Tensor] = None
-        if backend == "trtllm-gen":
-            self._kv_lens_buffer = torch.empty(
-                (32768,), dtype=torch.int32, device=self.device
-            )
+        
+        # TODO(Chiheng): add clusterfusion kv_lens_buffer limit
 
         if use_cuda_graph:
             if not torch.is_tensor(paged_kv_indptr_buffer):
@@ -168,7 +328,8 @@ class BatchDecodeWithPagedKVCacheWrapper:
         self._paged_kv_indptr_buf = paged_kv_indptr_buffer
         self._paged_kv_indices_buf = paged_kv_indices_buffer
         self._paged_kv_last_page_len_buf = paged_kv_last_page_len_buffer
-        self._use_tensor_cores = use_tensor_cores or backend == "trtllm-gen"
+        # TODO: comfirm that clusterfusion uses tensor cores
+        self._use_tensor_cores = use_tensor_cores or backend == "clusterfusion"
         self._use_cuda_graph = use_cuda_graph
 
         if use_tensor_cores:
@@ -359,6 +520,7 @@ class BatchDecodeWithPagedKVCacheWrapper:
             kv_lens_arr_host = get_seq_lens(indptr_host, last_page_len_host, page_size)
         else:
             kv_lens_arr_host = seq_lens.cpu()
+        # TODO(Chiheng): switch to clusterfusion
         if self._backend == "trtllm-gen":
             assert self._kv_layout == "HND"
             assert logits_soft_cap == 0.0
@@ -609,6 +771,7 @@ class BatchDecodeWithPagedKVCacheWrapper:
 
         pos_encoding_mode = self._pos_encoding_mode
         window_left = self._window_left if window_left is None else window_left
+        # TODO(Chiheng): figure out what the following comment means
         if self._backend != "trtllm-gen":
             # NOTE(Siyuan): since window_left is appeared in the plan function, we need to make sure it is the same as the one in the plan function.
             # Remove this check if the backend supports dynamic window_left.
@@ -769,3 +932,177 @@ class BatchDecodeWithPagedKVCacheWrapper:
     def end_forward(self) -> None:
         r"""Warning: this function is deprecated and has no effect."""
         pass
+
+# TODO(Chiheng): switch to clusterfusion
+class TrtllmGenDecodeModule:
+    def _paged_run(
+        self,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        workspace_buffer: torch.Tensor,
+        block_tables: torch.Tensor,
+        seq_lens: torch.Tensor,
+        max_seq_len: int,
+        bmm1_scale: float,  # todo(Yingyi): add dynamic scale tensor later
+        bmm2_scale: float,
+        window_left: int = -1,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if out is None:
+            out = torch.empty_like(query)
+        if self._sm_count is None:
+            self._sm_count = get_device_sm_count(query.device)
+        self._op.trtllm_paged_attention_decode(
+            out,
+            query.unsqueeze(
+                1
+            ),  # [B, 1, H, D], no MTP here so second dim is 1 # todo(Yingyi): add MTP??
+            kv_cache,
+            workspace_buffer,
+            block_tables,
+            seq_lens,
+            max_seq_len,
+            bmm1_scale,
+            bmm2_scale,
+            window_left,
+            self._sm_count,
+        )
+        return out
+
+    def _plan(self, *args, **kwargs):
+        pass
+
+    def __init__(self):
+        self._sm_count: Optional[int] = None
+        self._mod = trtllm_gen_fmha_module()
+        self._op = self._mod.build_and_load()
+        from flashinfer.jit.cubin_loader import (
+            setup_cubin_loader,
+            setup_metainfo_loader,
+        )
+
+        setup_cubin_loader(self._mod.get_library_path())
+        setup_metainfo_loader(self._mod.get_library_path())
+
+# TODO(Chiheng): switch to clusterfusion
+@functools.cache
+def get_trtllm_gen_decode_module(*args):
+    uri = get_batch_prefill_uri("trtllm-gen", *args)
+    module = TrtllmGenDecodeModule()
+
+    @register_custom_op(
+        f"flashinfer::{uri}_ragged_run",
+        mutates_args=(
+            "float_workspace_buffer",
+            "int_workspace_buffer",
+            "o",
+            "maybe_lse",
+        ),
+    )
+    def paged_run(
+        float_workspace_buffer: torch.Tensor,
+        int_workspace_buffer: torch.Tensor,
+        plan_info_vec: List[int],
+        q: torch.Tensor,
+        paged_k_cache: torch.Tensor,
+        paged_v_cache: torch.Tensor,
+        qo_indptr: torch.Tensor,
+        paged_kv_indptr: torch.Tensor,
+        paged_kv_indices: torch.Tensor,
+        paged_kv_last_page_len: torch.Tensor,
+        o: torch.Tensor,
+        maybe_lse: Optional[torch.Tensor],
+        mask_mode: int,
+        layout: int,
+        window_left: int,
+        enable_pdl: bool,
+        maybe_custom_mask: Optional[torch.Tensor],
+        maybe_mask_indptr: Optional[torch.Tensor],
+        maybe_alibi_slopes: Optional[torch.Tensor],
+        maybe_prefix_len_ptr: Optional[torch.Tensor],
+        maybe_token_pos_in_items_ptr: Optional[torch.Tensor],
+        maybe_max_item_len_ptr: Optional[torch.Tensor],
+        logits_soft_cap: float,
+        sm_scale: float,
+        scale_q: Optional[torch.Tensor],
+        scale_k: Optional[torch.Tensor],
+        scale_v: Optional[torch.Tensor],
+        rope_scale: float,
+        rope_theta: float,
+        token_pos_in_items_len: int,
+        paged_kv_cache: Optional[torch.Tensor] = None,
+        num_qo_heads: Optional[int] = None,
+        num_kv_heads: Optional[int] = None,
+        block_tables: Optional[torch.Tensor] = None,
+        kv_lens_buffer: Optional[torch.Tensor] = None,
+        page_size: Optional[int] = None,
+        max_kv_len: Optional[int] = None,
+    ) -> None:
+        assert maybe_lse is None
+        assert paged_kv_cache is not None
+        assert num_qo_heads is not None
+        assert num_kv_heads is not None
+        assert block_tables is not None
+        assert kv_lens_buffer is not None
+        assert page_size is not None
+        assert max_kv_len is not None
+        o = module._paged_run(
+            q.contiguous(),  # NOTE(Siyuan): without contiguous, the result is incorrect
+            paged_kv_cache,
+            int_workspace_buffer,
+            block_tables,
+            kv_lens_buffer,
+            max_kv_len,
+            sm_scale,
+            1.0,  # NOTE(Siyuan): update this to expose bmm2 scale
+            window_left,
+            out=o,
+        )
+
+    @register_fake_op(f"flashinfer::{uri}_paged_run")
+    def _fake_paged_run(
+        float_workspace_buffer: torch.Tensor,
+        int_workspace_buffer: torch.Tensor,
+        plan_info_vec: List[int],
+        q: torch.Tensor,
+        paged_k_cache: torch.Tensor,
+        paged_v_cache: torch.Tensor,
+        qo_indptr: torch.Tensor,
+        paged_kv_indptr: torch.Tensor,
+        paged_kv_indices: torch.Tensor,
+        paged_kv_last_page_len: torch.Tensor,
+        o: torch.Tensor,
+        maybe_lse: Optional[torch.Tensor],
+        mask_mode: int,
+        layout: int,
+        window_left: int,
+        enable_pdl: bool,
+        maybe_custom_mask: Optional[torch.Tensor],
+        maybe_mask_indptr: Optional[torch.Tensor],
+        maybe_alibi_slopes: Optional[torch.Tensor],
+        maybe_prefix_len_ptr: Optional[torch.Tensor],
+        maybe_token_pos_in_items_ptr: Optional[torch.Tensor],
+        maybe_max_item_len_ptr: Optional[torch.Tensor],
+        logits_soft_cap: float,
+        sm_scale: float,
+        rope_scale: float,
+        rope_theta: float,
+        token_pos_in_items_len: int,
+        paged_kv_cache: Optional[torch.Tensor] = None,
+        num_qo_heads: Optional[int] = None,
+        num_kv_heads: Optional[int] = None,
+        block_tables: Optional[torch.Tensor] = None,
+        kv_lens_buffer: Optional[torch.Tensor] = None,
+        page_size: Optional[int] = None,
+        max_kv_len: Optional[int] = None,
+    ) -> None:
+        pass
+
+    # Register the module.
+    #
+    # Note that plan is not part of model logic. It should not be included in
+    # Cuda Graph or torch.compile. So, we don't provide a torch library for plan.
+    return SimpleNamespace(
+        plan=module._plan,
+        paged_run=paged_run,
+    )

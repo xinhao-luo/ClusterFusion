@@ -24,6 +24,19 @@ dtype_map = {
     torch.uint64: "uint64_t",
 }
 
+filename_safe_dtype_map = {
+    torch.float16: "f16",
+    torch.bfloat16: "bf16",
+    torch.float8_e4m3fn: "e4m3",
+    torch.float8_e5m2: "e5m2",
+    torch.int8: "i8",
+    torch.uint8: "u8",
+    torch.int32: "i32",
+    torch.uint32: "u32",
+    torch.int64: "i64",
+    torch.uint64: "u64",
+}
+
 pos_encoding_mode_literal = {
     0: "PosEncodingMode::kNone",
     1: "PosEncodingMode::kRoPELlama",

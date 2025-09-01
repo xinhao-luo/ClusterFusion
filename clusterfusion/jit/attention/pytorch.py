@@ -8,11 +8,35 @@ from .. import env as jit_env
 from ..core import JitSpec, gen_jit_spec, sm90a_nvcc_flags
 from ..utils import (
     dtype_map,
+    filename_safe_dtype_map,
     mask_mode_literal,
     pos_encoding_mode_literal,
     write_if_different,
 )
 from .utils import generate_additional_params
+
+def get_batch_decode_uri(
+    dtype_q: torch.dtype,
+    dtype_kv: torch.dtype,
+    dtype_o: torch.dtype,
+    dtype_idx: torch.dtype,
+    head_dim_qk: int,
+    head_dim_vo: int,
+    pos_encoding_mode: int,
+    use_sliding_window: bool,
+    use_logits_soft_cap: bool,
+) -> str:
+    return (
+        f"batch_decode_with_kv_cache_dtype_q_{filename_safe_dtype_map[dtype_q]}_"
+        f"dtype_kv_{filename_safe_dtype_map[dtype_kv]}_"
+        f"dtype_o_{filename_safe_dtype_map[dtype_o]}_"
+        f"dtype_idx_{filename_safe_dtype_map[dtype_idx]}_"
+        f"head_dim_qk_{head_dim_qk}_"
+        f"head_dim_vo_{head_dim_vo}_"
+        f"posenc_{pos_encoding_mode}_"
+        f"use_swa_{use_sliding_window}_"
+        f"use_logits_cap_{use_logits_soft_cap}"
+    )
 
 def gen_customize_batch_decode_module(
     uri: str,

@@ -1,3 +1,4 @@
 from .pytorch import cudnn_fmha_gen_module as cudnn_fmha_gen_module
 from .pytorch import gen_customize_batch_decode_module as gen_customize_batch_decode_module
 from .pytorch import gen_customize_batch_prefill_module as gen_customize_batch_prefill_module
+from .pytorch import get_batch_attention_uri as get_batch_attention_uri
