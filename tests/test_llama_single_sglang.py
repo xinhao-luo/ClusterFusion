@@ -145,7 +145,9 @@ def test_llama_decode_e2e():
     kv_cache_full = generate_random_weights((2, seqlen, num_heads * head_dim)).to(0).half()
 
     # RoPE with cos and sin
-    cos, sin = initialize_rope_embeddings(head_dim)
+    cos, sin = initialize_rope_embeddings(head_dim // 2)
+    cos = torch.cat([cos, cos], dim=-1)
+    sin = torch.cat([sin, sin], dim=-1)
     # Our kernel
     o = []
     for i in range(test_run):

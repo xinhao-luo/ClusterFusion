@@ -30,8 +30,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     half* residual,  // 1 * hidden_dim
     half* w_rms_input,// hidden_dim
     float eps,
-    float* cos,       // head_dim
-    float* sin,       // head_dim
+    float* cos,       // head_dim // 2
+    float* sin,       // head_dim // 2
     half* k_cache,
     half* v_cache,
     const __grid_constant__ CUtensorMap tensor_map, // 3 * hidden_dim * hidden_dim
@@ -357,8 +357,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
 
     q_rope = __half2float(local_qkv[tid]);
     k_rope = __half2float(local_qkv[HEAD_DIM + tid]);
-    cos_reg = cos[tid];
-    sin_reg = sin[tid];
+    cos_reg = cos[tid % (HEAD_DIM / 2)];
+    sin_reg = sin[tid % (HEAD_DIM / 2)];
 #ifdef NEOX_STYLE_ROPE
     if (tid < HEAD_DIM / 2) {
         q_rope_1 = __half2float(local_qkv[HEAD_DIM / 2 + tid]);
