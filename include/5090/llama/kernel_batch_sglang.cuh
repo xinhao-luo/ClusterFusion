@@ -45,6 +45,14 @@ __forceinline__ __device__ float ptx_exp2(float x) {
   return y;
 }
 
+  __device__ __forceinline__ size_t protective_get_kv_offset(int start_idx, int end_idx, int offset) {
+    if (start_idx + offset < end_idx) {
+        return start_idx + offset;
+    } else {
+        return 0;
+    }
+  }
+
 __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecodeWithPagedKVCacheKernel(
     half* output, // 1 * hidden_dim
     half* k_output,
@@ -57,19 +65,20 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
     float* sin,       // head_dim // 2
     half* k_cache,
     half* v_cache,
+    int* paged_kv_indptr,
+    int* paged_kv_indices,
     const __grid_constant__ CUtensorMap tensor_map, // 3 * hidden_dim * hidden_dim
 #ifdef TMA_LOAD_FLASH_DECODING
     const __grid_constant__ CUtensorMap tensor_map_k_cache, // seqlen * head_num * head_dim
     const __grid_constant__ CUtensorMap tensor_map_v_cache, // seqlen * head_num * head_dim
 #endif
-    const __grid_constant__ CUtensorMap tensor_map_weight_o, // hidden_dim * hidden_dim
-    const uint32_t SEQ_LEN,
-    const uint32_t KV_DIM_PER_BLOCK
+    const __grid_constant__ CUtensorMap tensor_map_weight_o // hidden_dim * hidden_dim
 ) {
     cg::grid_group grid             = cg::this_grid();
     cg::cluster_group cluster       = cg::this_cluster();
     cg::thread_block block          = cg::this_thread_block();
-    const uint32_t head_id          = grid.cluster_rank();
+    const uint32_t batch_id         = blockIdx.y;
+    const uint32_t head_id          = grid.cluster_rank() % HEAD_NUM;
     const uint32_t cluster_block_id = cluster.block_rank();
     const uint32_t tid              = block.thread_rank();
     const uint32_t lane_id = tid % WARP_SIZE; 
@@ -138,6 +147,10 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
     uint weight_idx_3 = warp_id * NUM_ROW_PER_WARP_3 + lane_id / NUM_THREAD_PER_ROW_3;
     uint cluster_block_st_id = cluster_block_id * DIM_PER_BLOCK;
     uint cluster_head_idx = head_id * HEAD_DIM;
+    int start_idx = paged_kv_indptr[batch_id];
+    int end_idx = paged_kv_indptr[batch_id + 1];
+    const uint32_t SEQ_LEN = end_idx - start_idx;
+    const uint32_t KV_DIM_PER_BLOCK = ((SEQ_LEN + CLUSTER_SIZE - 1) / CLUSTER_SIZE + (TMA_LOAD_ONCE_ATTN - 1)) & ~(TMA_LOAD_ONCE_ATTN - 1);
 
     // RMSNorm
     for (int d = tid * 8; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 8) { 
@@ -474,16 +487,16 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
     for (int j = 0; j < DEC_TILE; j++) {
         cp_async_pred_load_128b(
             &weight[0 + (weight_idx_2 + j) * HEAD_DIM + input_idx_2], 
-            &k_cache[(cluster_block_id * KV_DIM_PER_BLOCK + weight_idx_2 + j) * HIDDEN_DIM + cluster_head_idx + input_idx_2],
-            (cluster_block_id * KV_DIM_PER_BLOCK + weight_idx_2 + j) < SEQ_LEN
+            &k_cache[(paged_kv_indices[protective_get_kv_offset(start_idx, end_idx, cluster_block_id * KV_DIM_PER_BLOCK + weight_idx_2 + j)]) * HIDDEN_DIM + cluster_head_idx + input_idx_2],
+            (start_idx + cluster_block_id * KV_DIM_PER_BLOCK + weight_idx_2 + j) < end_idx
         );
     }
     cp_async_commit_group();
     for (int j = 0; j < DEC_TILE; j++) {
         cp_async_pred_load_128b(
             &weight[TMA_LOAD_ONCE_NUM_ATTN + (weight_idx_2 + j) * HEAD_DIM + input_idx_2], 
-            &v_cache[(cluster_block_id * KV_DIM_PER_BLOCK + weight_idx_2 + j) * HIDDEN_DIM + cluster_head_idx + input_idx_2],
-            (cluster_block_id * KV_DIM_PER_BLOCK + weight_idx_2 + j) < SEQ_LEN
+            &v_cache[(paged_kv_indices[protective_get_kv_offset(start_idx, end_idx, cluster_block_id * KV_DIM_PER_BLOCK + weight_idx_2 + j)]) * HIDDEN_DIM + cluster_head_idx + input_idx_2],
+            (start_idx + cluster_block_id * KV_DIM_PER_BLOCK + weight_idx_2 + j) < end_idx
         );
     }
     cp_async_commit_group();
@@ -503,8 +516,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
         for (int j = 0; j < DEC_TILE; j++) {
             cp_async_pred_load_128b(
                 &weight[(id % 2) * TMA_LOAD_ONCE_NUM + (weight_idx_2 + j) * HEAD_DIM + input_idx_2], 
-                &k_cache[(cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) * HIDDEN_DIM + cluster_head_idx + input_idx_2],
-                (cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) < SEQ_LEN
+                &k_cache[(paged_kv_indices[protective_get_kv_offset(start_idx, end_idx, cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j)]) * HIDDEN_DIM + cluster_head_idx + input_idx_2],
+                (start_idx + cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) < end_idx
             );
         }
         cp_async_commit_group();
@@ -555,8 +568,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
         for (int j = 0; j < DEC_TILE; j++) {
             cp_async_pred_load_128b(
                 &weight[(id % 2) * TMA_LOAD_ONCE_NUM + TMA_LOAD_ONCE_NUM_ATTN + (weight_idx_2 + j) * HEAD_DIM + input_idx_2], 
-                &v_cache[(cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) * HIDDEN_DIM + cluster_head_idx + input_idx_2],
-                (cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) < SEQ_LEN
+                &v_cache[(paged_kv_indices[protective_get_kv_offset(start_idx, end_idx, cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j)]) * HIDDEN_DIM + cluster_head_idx + input_idx_2],
+                (start_idx + cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) < end_idx
             );
         }
         cp_async_commit_group();

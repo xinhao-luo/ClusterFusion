@@ -6,6 +6,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
     torch::Tensor residual,
     torch::Tensor weight_qkv,
     torch::Tensor weight_o,
+    torch::Tensor paged_kv_indptr,
+    torch::Tensor paged_kv_indices,
     torch::Tensor k_cache,
     torch::Tensor v_cache,
     torch::Tensor rms_input_weight,
@@ -19,9 +21,11 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
     uint32_t max_shmem_size = 128 * sizeof(char) + (2 * TMA_LOAD_ONCE * MAX_SMEM_DIM + DIM_PER_BLOCK + 3 * HEAD_DIM) * sizeof(half) + DIM_BLOCK_REDUCE * sizeof(float);
     cudaFuncSetAttribute(LlamaDecoderLayerBatchDecodeWithPagedKVCacheKernel, cudaFuncAttributeMaxDynamicSharedMemorySize, max_shmem_size);
     auto options = torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA, 0);
-    torch::Tensor o = torch::full({1, HIDDEN_DIM}, 0, options);
-    torch::Tensor k = torch::full({1, HEAD_NUM, HEAD_DIM}, 0, options);
-    torch::Tensor v = torch::full({1, HEAD_NUM, HEAD_DIM}, 0, options);
+
+    uint32_t batch_size = input.size(0);
+    torch::Tensor o = torch::full({batch_size, HIDDEN_DIM}, 0, options);
+    torch::Tensor k = torch::full({batch_size, HEAD_NUM, HEAD_DIM}, 0, options);
+    torch::Tensor v = torch::full({batch_size, HEAD_NUM, HEAD_DIM}, 0, options);
     half* o_ptr = reinterpret_cast<half*>(o.data_ptr<at::Half>());
     half* k_ptr = reinterpret_cast<half*>(k.data_ptr<at::Half>());
     half* v_ptr = reinterpret_cast<half*>(v.data_ptr<at::Half>());
@@ -35,13 +39,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
     half* rms_input_weight_ptr = reinterpret_cast<half*>(rms_input_weight.data_ptr<at::Half>());
     float* cos_ptr = reinterpret_cast<float*>(cos.data_ptr<float>());
     float* sin_ptr = reinterpret_cast<float*>(sin.data_ptr<float>());
-
-    const uint32_t SEQ_LEN = k_cache.size(0);
-    const uint32_t KV_DIM_PER_BLOCK = ((SEQ_LEN + CLUSTER_SIZE - 1) / CLUSTER_SIZE + (TMA_LOAD_ONCE_ATTN - 1)) & ~(TMA_LOAD_ONCE_ATTN - 1);
+    int* paged_kv_indptr_ptr = reinterpret_cast<int*>(paged_kv_indptr.data_ptr<int>());
+    int* paged_kv_indices_ptr = reinterpret_cast<int*>(paged_kv_indices.data_ptr<int>());
     
     CUtensorMap tensor_map_weight{};
+#ifdef TMA_LOAD_FLASH_DECODING
     CUtensorMap tensor_map_k_cache{};
     CUtensorMap tensor_map_v_cache{};
+#endif
     CUtensorMap tensor_map_weight_o{};
     
     constexpr uint32_t rank = 2;
@@ -125,7 +130,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
         CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
     );
 
-    dim3 grid(HEAD_NUM * CLUSTER_SIZE); 
+    dim3 grid(HEAD_NUM * CLUSTER_SIZE, batch_size); 
     dim3 block(BLOCK_SIZE);
 
     cudaDeviceSynchronize();
@@ -141,14 +146,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
         sin_ptr,
         k_cache_ptr,
         v_cache_ptr,
+        paged_kv_indptr_ptr,
+        paged_kv_indices_ptr,
         tensor_map_weight,
 #ifdef TMA_LOAD_FLASH_DECODING
         tensor_map_k_cache,
         tensor_map_v_cache,
 #endif
-        tensor_map_weight_o,
-        SEQ_LEN,
-        KV_DIM_PER_BLOCK
+        tensor_map_weight_o
     );
     cudaDeviceSynchronize();
     return std::make_tuple(o, residual, k, v);

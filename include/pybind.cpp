@@ -64,6 +64,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
     torch::Tensor residual,
     torch::Tensor weight_qkv,
     torch::Tensor weight_o,
+    torch::Tensor paged_kv_indptr,
+    torch::Tensor paged_kv_indices,
     torch::Tensor k_cache,
     torch::Tensor v_cache,
     torch::Tensor rms_input_weight,
