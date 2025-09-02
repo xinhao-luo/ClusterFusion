@@ -521,9 +521,8 @@ class BatchDecodeWithPagedKVCacheWrapper:
         else:
             kv_lens_arr_host = seq_lens.cpu()
         # TODO(Chiheng): switch to clusterfusion
-        if self._backend == "trtllm-gen":
-            assert self._kv_layout == "HND"
-            assert logits_soft_cap == 0.0
+        if self._backend == "clusterfusion":
+            assert self._kv_layout == "NHD", "ClusterFusion backend only supports NHD layout"
             self._max_kv_len = max(kv_lens_arr_host).item()
             self._kv_lens_buffer[: len(kv_lens_arr_host)].copy_(
                 kv_lens_arr_host, non_blocking=non_blocking
