@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import flashinfer
 import torch.cuda.nvtx as nvtx
-from clusterfusion import llama_decoder_layer_sglang
+import clusterfusion
 
 hidden_size = 4096
 num_heads = 32
@@ -152,7 +152,7 @@ def test_llama_decode_e2e():
     o = []
     for i in range(test_run):
         tmp_residual = residual.clone()
-        output, _, k, v = llama_decoder_layer_sglang(
+        output, _, k, v = clusterfusion.llama_decoder_layer_batch_decode_sglang(
             input_tensor,          
             tmp_residual,
             weight_qkv,                          

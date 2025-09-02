@@ -64,6 +64,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
         CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
     );
 
+#ifdef TMA_LOAD_FLASH_DECODING
     uint64_t size_k_cache[rank] = {HIDDEN_DIM, SEQ_LEN};
     uint64_t stride_k_cache[rank - 1] = {HIDDEN_DIM * sizeof(half)};
     uint32_t box_size_k_cache[rank] = {HEAD_DIM, TMA_LOAD_ONCE / 2};
@@ -103,7 +104,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
         CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
         CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
     );
-
+#endif
 
     uint64_t size_weight_o[rank] = {HIDDEN_DIM, HIDDEN_DIM};
     uint64_t stride_weight_o[rank - 1] = {HIDDEN_DIM * sizeof(half)};
@@ -141,8 +142,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
         k_cache_ptr,
         v_cache_ptr,
         tensor_map_weight,
+#ifdef TMA_LOAD_FLASH_DECODING
         tensor_map_k_cache,
         tensor_map_v_cache,
+#endif
         tensor_map_weight_o,
         SEQ_LEN,
         KV_DIM_PER_BLOCK
