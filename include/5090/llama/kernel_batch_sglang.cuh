@@ -16,11 +16,11 @@ namespace cg = cooperative_groups;
 // If commented, we will use GPT-J style RoPE for tests/models/llama.py
 #define NEOX_STYLE_ROPE
 // If defined, use TMA load in flash-decoding. Else we will use cp.async
-#define TMA_LOAD_FLASH_DECODING
+//#define TMA_LOAD_FLASH_DECODING
 
 #ifndef TMA_LOAD_FLASH_DECODING
 // wrapper of cp.async
-__device__ __forceinline__ void cp_async_pred_load_128b(c10::Half* smem_ptr, const c10::Half* gmem_ptr, bool predicate) {
+__device__ __forceinline__ void cp_async_pred_load_128b(half* smem_ptr, const half* gmem_ptr, bool predicate) {
     uint32_t smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
     int src_in_bytes = predicate ? 16 : 0;
     asm volatile("cp.async.cg.shared.global [%0], [%1], %2, %3;\n" ::"r"(smem_int_ptr),
@@ -471,9 +471,25 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
         token[2] = bar[2].arrive();
     }
 #else
-
+    for (int j = 0; j < DEC_TILE; j++) {
+        cp_async_pred_load_128b(
+            &weight[0 + (weight_idx_2 + j) * HEAD_DIM + input_idx_2], 
+            &k_cache[(cluster_block_id * KV_DIM_PER_BLOCK + weight_idx_2 + j) * HIDDEN_DIM + cluster_head_idx + input_idx_2],
+            (cluster_block_id * KV_DIM_PER_BLOCK + weight_idx_2 + j) < SEQ_LEN
+        );
+    }
+    cp_async_commit_group();
+    for (int j = 0; j < DEC_TILE; j++) {
+        cp_async_pred_load_128b(
+            &weight[TMA_LOAD_ONCE_NUM_ATTN + (weight_idx_2 + j) * HEAD_DIM + input_idx_2], 
+            &v_cache[(cluster_block_id * KV_DIM_PER_BLOCK + weight_idx_2 + j) * HIDDEN_DIM + cluster_head_idx + input_idx_2],
+            (cluster_block_id * KV_DIM_PER_BLOCK + weight_idx_2 + j) < SEQ_LEN
+        );
+    }
+    cp_async_commit_group();
 #endif
 
+    // mainloop
     for (int id = 1; id < KV_DIM_PER_BLOCK / TMA_LOAD_ONCE_ATTN; id++) {
 #ifdef TMA_LOAD_FLASH_DECODING
         if (tid == 0) {
@@ -484,7 +500,16 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
         }
         bar[(id - 1) % 2].wait(std::move(token[(id - 1) % 2]));
 #else
-
+        for (int j = 0; j < DEC_TILE; j++) {
+            cp_async_pred_load_128b(
+                &weight[(id % 2) * TMA_LOAD_ONCE_NUM + (weight_idx_2 + j) * HEAD_DIM + input_idx_2], 
+                &k_cache[(cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) * HIDDEN_DIM + cluster_head_idx + input_idx_2],
+                (cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) < SEQ_LEN
+            );
+        }
+        cp_async_commit_group();
+        cp_async_wait_group<2>();
+        block.sync();
 #endif
         pre_max = local_max;
         #pragma unroll
@@ -527,7 +552,16 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
         }
         bar[2 + (id - 1) % 2].wait(std::move(token[2 + (id - 1) % 2]));
 #else
-
+        for (int j = 0; j < DEC_TILE; j++) {
+            cp_async_pred_load_128b(
+                &weight[(id % 2) * TMA_LOAD_ONCE_NUM + TMA_LOAD_ONCE_NUM_ATTN + (weight_idx_2 + j) * HEAD_DIM + input_idx_2], 
+                &v_cache[(cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) * HIDDEN_DIM + cluster_head_idx + input_idx_2],
+                (cluster_block_id * KV_DIM_PER_BLOCK + id * TMA_LOAD_ONCE_ATTN + weight_idx_2 + j) < SEQ_LEN
+            );
+        }
+        cp_async_commit_group();
+        cp_async_wait_group<2>();
+        block.sync();
 #endif
         for (int j = 0; j < DEC_TILE; j++) {
             *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight[((id - 1) % 2) * TMA_LOAD_ONCE_NUM + TMA_LOAD_ONCE_NUM_ATTN + (weight_idx_2 + j) * HEAD_DIM + input_idx_2]);
@@ -538,6 +572,9 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
             }
         }
     }
+    // end: mainloop
+
+    // epilogue
 #ifdef TMA_LOAD_FLASH_DECODING
     if (KV_DIM_PER_BLOCK > TMA_LOAD_ONCE_ATTN) {
         bar[(KV_DIM_PER_BLOCK / TMA_LOAD_ONCE_ATTN - 1) % 2].wait(std::move(token[(KV_DIM_PER_BLOCK / TMA_LOAD_ONCE_ATTN - 1) % 2]));
@@ -545,7 +582,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
         bar[0].wait(std::move(token[0]));
     }
 #else
-
+    cp_async_wait_group<1>();
+    block.sync();
 #endif
     pre_max = local_max;
     #pragma unroll
@@ -585,7 +623,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
         bar[2].wait(std::move(token[2]));
     }
 #else
-
+    cp_async_wait_group<0>();
+    block.sync();
 #endif
     for (int j = 0; j < DEC_TILE; j++) {
         *(uint4*)(&reg_weight[0]) = *(uint4*)(&weight[((KV_DIM_PER_BLOCK / TMA_LOAD_ONCE_ATTN - 1) % 2) * TMA_LOAD_ONCE_NUM + TMA_LOAD_ONCE_NUM_ATTN + (weight_idx_2 + j) * HEAD_DIM + input_idx_2]);
