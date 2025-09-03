@@ -54,15 +54,15 @@ __forceinline__ __device__ float ptx_exp2(float x) {
   }
 
 __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecodeWithPagedKVCacheKernel(
-    half* output, // 1 * hidden_dim
-    half* k_output,
-    half* v_output,
-    half* input,  // 1 * hidden_dim
-    half* residual,  // 1 * hidden_dim
-    half* w_rms_input,// hidden_dim
+    half* output,        // batch_size * hidden_dim
+    half* k_output,      // batch_size * hidden_dim
+    half* v_output,      // batch_size * hidden_dim
+    half* input,         // batch_size * hidden_dim
+    half* residual,      // batch_size * hidden_dim
+    half* w_rms_input,   // hidden_dim
     float eps,
-    float* cos,       // head_dim // 2
-    float* sin,       // head_dim // 2
+    float* cos,          // batch_size * head_dim // 2
+    float* sin,          // batch_size * head_dim // 2
     half* k_cache,
     half* v_cache,
     int* paged_kv_indptr,
@@ -148,19 +148,19 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
     uint cluster_block_st_id = cluster_block_id * DIM_PER_BLOCK;
     uint cluster_head_idx = head_id * HEAD_DIM;
     int start_idx = paged_kv_indptr[batch_id];
-    int end_idx = paged_kv_indptr[batch_id + 1];
+    int end_idx = paged_kv_indptr[batch_id + 1] - 1;
     const uint32_t SEQ_LEN = end_idx - start_idx;
     const uint32_t KV_DIM_PER_BLOCK = ((SEQ_LEN + CLUSTER_SIZE - 1) / CLUSTER_SIZE + (TMA_LOAD_ONCE_ATTN - 1)) & ~(TMA_LOAD_ONCE_ATTN - 1);
 
     // RMSNorm
     for (int d = tid * 8; d < DIM_PER_BLOCK; d+=BLOCK_SIZE * 8) { 
-        *(uint4*)(&reg_input[0]) = *(uint4*)(&input[cluster_block_st_id + d]);
-        *(uint4*)(&reg_residual[0]) = *(uint4*)(&residual[cluster_block_st_id + d]);
+        *(uint4*)(&reg_input[0]) = *(uint4*)(&input[batch_id * HIDDEN_DIM + cluster_block_st_id + d]);
+        *(uint4*)(&reg_residual[0]) = *(uint4*)(&residual[batch_id * HIDDEN_DIM + cluster_block_st_id + d]);
         for (int di = 0; di < 8; di++) {
             reg_input[di] = __float2half(__half2float(reg_input[di]) + __half2float(reg_residual[di]));
             local_sum += __half2float(reg_input[di]) * __half2float(reg_input[di]);
         }
-        *(uint4*)(&residual[cluster_block_st_id + d]) = *(uint4*)(&reg_input[0]);
+        *(uint4*)(&residual[batch_id * HIDDEN_DIM + cluster_block_st_id + d]) = *(uint4*)(&reg_input[0]);
     }
     #pragma unroll
     for (int mask = 16; mask > 0; mask >>= 1) {
@@ -395,8 +395,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
 
     q_rope = __half2float(local_qkv[tid]);
     k_rope = __half2float(local_qkv[HEAD_DIM + tid]);
-    cos_reg = cos[tid % (HEAD_DIM / 2)];
-    sin_reg = sin[tid % (HEAD_DIM / 2)];
+    cos_reg = cos[(batch_id * (HEAD_DIM / 2)) + (tid % (HEAD_DIM / 2))];
+    sin_reg = sin[(batch_id * (HEAD_DIM / 2)) + (tid % (HEAD_DIM / 2))];
 #ifdef NEOX_STYLE_ROPE
     if (tid < HEAD_DIM / 2) {
         q_rope_1 = __half2float(local_qkv[HEAD_DIM / 2 + tid]);
@@ -435,8 +435,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
     // Output kv
     cluster.sync();
     if (cluster_block_id == 0) {
-        k_output[head_id * HEAD_DIM + tid] = local_qkv[HEAD_DIM + tid];
-        v_output[head_id * HEAD_DIM + tid] = local_qkv[2 * HEAD_DIM + tid];
+        k_output[batch_id * HIDDEN_DIM + head_id * HEAD_DIM + tid] = local_qkv[HEAD_DIM + tid];
+        v_output[batch_id * HIDDEN_DIM + head_id * HEAD_DIM + tid] = local_qkv[2 * HEAD_DIM + tid];
     }
     cluster.sync();
 
@@ -862,7 +862,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
             tmp += __shfl_down_sync(0xffffffff, tmp, mask);
         }
         if (lane_id % NUM_THREAD_PER_ROW_3 == 0) {
-            atomicAdd(&output[cluster_block_st_id + weight_idx_3 + (id - 1) * TMA_LOAD_ONCE], __float2half(tmp));
+            atomicAdd(&output[batch_id * HIDDEN_DIM + cluster_block_st_id + weight_idx_3 + (id - 1) * TMA_LOAD_ONCE], __float2half(tmp));
             // input_shmem[weight_idx_3 + (id - 1) * TMA_LOAD_ONCE] = __float2half(tmp);
         }
         block.sync();
@@ -883,7 +883,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
         tmp += __shfl_down_sync(0xffffffff, tmp, mask);
     }
     if (lane_id % NUM_THREAD_PER_ROW_3 == 0) {
-        atomicAdd(&output[cluster_block_st_id + weight_idx_3 + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE], __float2half(tmp));
+        atomicAdd(&output[batch_id * HIDDEN_DIM + cluster_block_st_id + weight_idx_3 + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE], __float2half(tmp));
         // input_shmem[weight_idx_3 + ((DIM_PER_BLOCK / TMA_LOAD_ONCE) - 1) * TMA_LOAD_ONCE] = __float2half(tmp);
     }
     // block.sync();
