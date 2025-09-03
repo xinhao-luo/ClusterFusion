@@ -43,10 +43,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
     int* paged_kv_indices_ptr = reinterpret_cast<int*>(paged_kv_indices.data_ptr<int>());
     
     CUtensorMap tensor_map_weight{};
-#ifdef TMA_LOAD_FLASH_DECODING
-    CUtensorMap tensor_map_k_cache{};
-    CUtensorMap tensor_map_v_cache{};
-#endif
     CUtensorMap tensor_map_weight_o{};
     
     constexpr uint32_t rank = 2;
