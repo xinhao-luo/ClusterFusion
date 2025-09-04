@@ -103,10 +103,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
         paged_kv_indptr_ptr,
         paged_kv_indices_ptr,
         tensor_map_weight,
-#ifdef TMA_LOAD_FLASH_DECODING
-        tensor_map_k_cache,
-        tensor_map_v_cache,
-#endif
         tensor_map_weight_o
     );
     cudaDeviceSynchronize();
