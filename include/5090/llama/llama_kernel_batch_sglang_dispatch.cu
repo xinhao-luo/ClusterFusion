@@ -24,23 +24,12 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
 
     uint32_t batch_size = input.size(0);
     torch::Tensor o = torch::full({batch_size, HIDDEN_DIM}, 0, options);
-    torch::Tensor k = torch::full({batch_size, HEAD_NUM, HEAD_DIM}, 0, options);
-    torch::Tensor v = torch::full({batch_size, HEAD_NUM, HEAD_DIM}, 0, options);
     torch::Tensor residual_output = torch::full({batch_size, HIDDEN_DIM}, 0, options);
     half* o_ptr = reinterpret_cast<half*>(o.data_ptr<at::Half>());
-    half* k_ptr = reinterpret_cast<half*>(k.data_ptr<at::Half>());
-    half* v_ptr = reinterpret_cast<half*>(v.data_ptr<at::Half>());
     half* residual_output_ptr = reinterpret_cast<half*>(residual_output.data_ptr<at::Half>());
 
     // 验证连续性
     assert(o.is_contiguous());
-    assert(k.is_contiguous());
-    assert(v.is_contiguous());
-
-    // 验证预期的内存布局
-    assert(k.stride(0) == HEAD_NUM * HEAD_DIM);
-    assert(k.stride(1) == HEAD_DIM);
-    assert(k.stride(2) == 1);
 
     half* input_ptr = reinterpret_cast<half*>(input.data_ptr<at::Half>());
     half* residual_ptr = reinterpret_cast<half*>(residual.data_ptr<at::Half>());
@@ -102,8 +91,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
     cudaDeviceSynchronize();
     LlamaDecoderLayerBatchDecodeWithPagedKVCacheKernel<<<grid, block, max_shmem_size>>>(
         o_ptr,
-        k_ptr,
-        v_ptr,
         input_ptr,
         residual_ptr,
         residual_output_ptr,
@@ -119,5 +106,5 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
         tensor_map_weight_o
     );
     cudaDeviceSynchronize();
-    return std::make_tuple(o, residual_output, k, v);
+    return std::make_tuple(o, residual_output);
 }

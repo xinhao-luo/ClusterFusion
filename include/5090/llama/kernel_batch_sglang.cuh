@@ -42,8 +42,6 @@ __forceinline__ __device__ float ptx_exp2(float x) {
 
 __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecodeWithPagedKVCacheKernel(
     half* output,        // batch_size * hidden_dim
-    half* k_output,      // batch_size * hidden_dim
-    half* v_output,      // batch_size * hidden_dim
     half* input,         // batch_size * hidden_dim
     half* residual,      // batch_size * hidden_dim
     half* residual_output,
@@ -337,11 +335,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
         local_qkv[HEAD_DIM + tid] = __float2half(k_rope * cos_reg + k_rope_1 * sin_reg);
     }
 
-    // Output kv
+    // Save new kv
     cluster.sync();
     if (cluster_block_id == 0) {
-        k_output[batch_id * HEAD_NUM * HEAD_DIM + head_id * HEAD_DIM + tid] = local_qkv[HEAD_DIM + tid];
-        v_output[batch_id * HEAD_NUM * HEAD_DIM + head_id * HEAD_DIM + tid] = local_qkv[2 * HEAD_DIM + tid];
+        k_cache[paged_kv_indices[end_idx] * HIDDEN_DIM + head_id * HEAD_DIM + tid] = local_qkv[HEAD_DIM + tid];
+        v_cache[paged_kv_indices[end_idx] * HIDDEN_DIM + head_id * HEAD_DIM + tid] = local_qkv[2 * HEAD_DIM + tid];
     }
     cluster.sync();
 
