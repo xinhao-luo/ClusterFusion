@@ -1,7 +1,7 @@
 #include "kernel_batch_sglang.cuh"
 #include <torch/extension.h>
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_decoder_layer_batch_sglang_sm120(
+std::tuple<torch::Tensor, torch::Tensor> llama_decoder_layer_batch_sglang_sm120(
     torch::Tensor input,
     torch::Tensor residual,
     torch::Tensor weight_qkv,
