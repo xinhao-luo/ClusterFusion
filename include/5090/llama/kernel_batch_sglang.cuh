@@ -46,6 +46,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
     half* v_output,      // batch_size * hidden_dim
     half* input,         // batch_size * hidden_dim
     half* residual,      // batch_size * hidden_dim
+    half* residual_output,
     half* w_rms_input,   // hidden_dim
     float eps,
     float* cos,          // batch_size * head_dim // 2
@@ -60,7 +61,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
     cg::grid_group grid             = cg::this_grid();
     cg::cluster_group cluster       = cg::this_cluster();
     cg::thread_block block          = cg::this_thread_block();
-    const uint32_t batch_id         = blockIdx.y;
+    const uint32_t batch_id         = grid.cluster_rank() / HEAD_NUM;
     const uint32_t head_id          = grid.cluster_rank() % HEAD_NUM;
     const uint32_t cluster_block_id = cluster.block_rank();
     const uint32_t tid              = block.thread_rank();
@@ -77,18 +78,6 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
     float* reduction = reinterpret_cast<float*>(input_shmem + DIM_PER_BLOCK);
 
     __shared__ float cluster_local_sum, cluster_local_max;
-
-    // Init registers
-    float local_sum = 0.0, rms_rcp = 0.0, tmp = 0.0, local_max = -CUDART_INF_F, pre_max = -CUDART_INF_F, scale = 0.0, softmax_scale = __frsqrt_rn(HEAD_DIM) * 1.44269504088896340736f;
-    half __align__(16) reg_input[NUM_PER_THREAD], reg_residual[NUM_PER_THREAD], reg_weight[NUM_PER_THREAD];
-    float reg_reduce[NUM_PER_THREAD];
-    float* dst_shmem;
-    // half2 q_rope, q_rope_1, k_rope, k_rope_1;
-    // float2 cos_reg, sin_reg;
-    float q_rope, q_rope_1, k_rope, k_rope_1, cos_reg, sin_reg;
-    uint32_t size;
-    uint32_t src_addr, dst_addr, neighbor_dst_bar = 0;
-    float __align__(16) qk[DEC_TILE];
 
     // Init barrier
     #pragma nv_diag_suppress static_var_with_dynamic_init
@@ -107,6 +96,18 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
         cde::fence_proxy_async_shared_cta();
     }
     block.sync();
+
+    // Init registers
+    float local_sum = 0.0, rms_rcp = 0.0, tmp = 0.0, local_max = -CUDART_INF_F, pre_max = -CUDART_INF_F, scale = 0.0, softmax_scale = __frsqrt_rn(HEAD_DIM) * 1.44269504088896340736f;
+    half __align__(16) reg_input[NUM_PER_THREAD], reg_residual[NUM_PER_THREAD], reg_weight[NUM_PER_THREAD];
+    float reg_reduce[NUM_PER_THREAD];
+    float* dst_shmem;
+    // half2 q_rope, q_rope_1, k_rope, k_rope_1;
+    // float2 cos_reg, sin_reg;
+    float q_rope, q_rope_1, k_rope, k_rope_1, cos_reg, sin_reg;
+    uint32_t size;
+    uint32_t src_addr, dst_addr, neighbor_dst_bar = 0;
+    float __align__(16) qk[DEC_TILE];
 
     // Precompute some indices
     uint input_idx = (lane_id % NUM_THREAD_PER_ROW) * NUM_PER_THREAD;
@@ -130,8 +131,9 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
             reg_input[di] = __float2half(__half2float(reg_input[di]) + __half2float(reg_residual[di]));
             local_sum += __half2float(reg_input[di]) * __half2float(reg_input[di]);
         }
-        *(uint4*)(&residual[batch_id * HIDDEN_DIM + cluster_block_st_id + d]) = *(uint4*)(&reg_input[0]);
+        *(uint4*)(&residual_output[batch_id * HIDDEN_DIM + cluster_block_st_id + d]) = *(uint4*)(&reg_input[0]);
     }
+    block.sync();
     #pragma unroll
     for (int mask = 16; mask > 0; mask >>= 1) {
         local_sum += __shfl_down_sync(0xffffffff, local_sum, mask);
