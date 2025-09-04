@@ -338,8 +338,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
     // Save new kv
     cluster.sync();
     if (cluster_block_id == 0) {
-        k_cache[paged_kv_indices[end_idx + 1] * HIDDEN_DIM + head_id * HEAD_DIM + tid] = local_qkv[HEAD_DIM + tid];
-        v_cache[paged_kv_indices[end_idx + 1] * HIDDEN_DIM + head_id * HEAD_DIM + tid] = local_qkv[2 * HEAD_DIM + tid];
+        k_cache[paged_kv_indices[end_idx] * HIDDEN_DIM + head_id * HEAD_DIM + tid] = local_qkv[HEAD_DIM + tid];
+        v_cache[paged_kv_indices[end_idx] * HIDDEN_DIM + head_id * HEAD_DIM + tid] = local_qkv[2 * HEAD_DIM + tid];
     }
     cluster.sync();
 
