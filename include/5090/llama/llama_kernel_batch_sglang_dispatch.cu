@@ -1,5 +1,7 @@
 #include "kernel_batch_sglang.cuh"
 #include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+
 
 void llama_decoder_layer_batch_sglang_sm120(
     torch::Tensor output,
@@ -24,6 +26,8 @@ void llama_decoder_layer_batch_sglang_sm120(
     uint32_t max_shmem_size = 128 * sizeof(char) + (2 * TMA_LOAD_ONCE * MAX_SMEM_DIM + DIM_PER_BLOCK + 3 * HEAD_DIM) * sizeof(half) + DIM_BLOCK_REDUCE * sizeof(float);
     cudaFuncSetAttribute(LlamaDecoderLayerBatchDecodeWithPagedKVCacheKernel, cudaFuncAttributeMaxDynamicSharedMemorySize, max_shmem_size);
     auto options = torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA, 0);
+
+    cudaStream_t stream = c10::cuda::getCurrentCUDAStream().stream();
 
     uint32_t batch_size = input.size(0);
     half* o_ptr = reinterpret_cast<half*>(output.data_ptr<at::Half>());
@@ -86,7 +90,7 @@ void llama_decoder_layer_batch_sglang_sm120(
     dim3 grid(HEAD_NUM * CLUSTER_SIZE * batch_size); 
     dim3 block(BLOCK_SIZE);
 
-    LlamaDecoderLayerBatchDecodeWithPagedKVCacheKernel<<<grid, block, max_shmem_size>>>(
+    LlamaDecoderLayerBatchDecodeWithPagedKVCacheKernel<<<grid, block, max_shmem_size, stream>>>(
         o_ptr,
         input_ptr,
         residual_ptr,
