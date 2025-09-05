@@ -1,7 +1,9 @@
 #include "kernel_batch_sglang.cuh"
 #include <torch/extension.h>
 
-std::tuple<torch::Tensor, torch::Tensor> llama_decoder_layer_batch_sglang_sm120(
+void llama_decoder_layer_batch_sglang_sm120(
+    torch::Tensor output,
+    torch::Tensor residual_output,
     torch::Tensor input,
     torch::Tensor residual,
     torch::Tensor weight_qkv,
@@ -24,9 +26,7 @@ std::tuple<torch::Tensor, torch::Tensor> llama_decoder_layer_batch_sglang_sm120(
     auto options = torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA, 0);
 
     uint32_t batch_size = input.size(0);
-    torch::Tensor o = torch::full({batch_size, HIDDEN_DIM}, 0, options);
-    torch::Tensor residual_output = torch::full({batch_size, HIDDEN_DIM}, 0, options);
-    half* o_ptr = reinterpret_cast<half*>(o.data_ptr<at::Half>());
+    half* o_ptr = reinterpret_cast<half*>(output.data_ptr<at::Half>());
     half* residual_output_ptr = reinterpret_cast<half*>(residual_output.data_ptr<at::Half>());
 
     half* input_ptr = reinterpret_cast<half*>(input.data_ptr<at::Half>());
@@ -105,5 +105,6 @@ std::tuple<torch::Tensor, torch::Tensor> llama_decoder_layer_batch_sglang_sm120(
         tensor_map_weight_o
     );
     cudaDeviceSynchronize();
-    return std::make_tuple(o, residual_output);
+
+    return;
 }

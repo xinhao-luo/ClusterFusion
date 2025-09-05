@@ -59,7 +59,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_dec
     torch::Tensor sin
 );
 
-std::tuple<torch::Tensor, torch::Tensor> llama_decoder_layer_batch_sglang_sm120(
+void llama_decoder_layer_batch_sglang_sm120(
+    torch::Tensor output,
+    torch::Tensor residual_output,
     torch::Tensor input,
     torch::Tensor residual,
     torch::Tensor weight_qkv,
