@@ -47,7 +47,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
     half* residual_output,
     half* w_rms_input,   // hidden_dim
     float eps,
-    long long* positions,
+    int64_t* positions,
     float* cos_sin,
     half* k_cache,
     half* v_cache,

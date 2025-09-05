@@ -38,7 +38,7 @@ std::tuple<torch::Tensor, torch::Tensor> llama_decoder_layer_batch_sglang_sm120(
     half* k_cache_ptr = reinterpret_cast<half*>(k_cache.data_ptr<at::Half>());
     half* v_cache_ptr = reinterpret_cast<half*>(v_cache.data_ptr<at::Half>());
     half* rms_input_weight_ptr = reinterpret_cast<half*>(rms_input_weight.data_ptr<at::Half>());
-    long long* positions_ptr = reinterpret_cast<long long*>(positions.data_ptr<long long>());
+    int64_t* positions_ptr = reinterpret_cast<int64_t*>(positions.data_ptr<int64_t>());
     float* cos_sin_ptr = reinterpret_cast<float*>(cos_sin.data_ptr<float>());
     int* paged_kv_indptr_ptr = reinterpret_cast<int*>(paged_kv_indptr.data_ptr<int>());
     int* paged_kv_indices_ptr = reinterpret_cast<int*>(paged_kv_indices.data_ptr<int>());
