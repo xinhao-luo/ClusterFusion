@@ -260,43 +260,66 @@ class Attention(nn.Module):
         self.attention_kernel = original_attention
 
         self.use_cluster_fusion = os.getenv("USE_CLUSTER_FUSION", 'false').lower() == 'true'
-
-        # Profiler
-        self.prefill_duration_ms = 0.0
-        self.prefill_call_count = 0
-        self.decode_duration_ms = 0.0
-        self.decode_call_count = 0
-        self.total_tokens_processed = 0
-        self.start_event = torch.cuda.Event(enable_timing=True)
-        self.end_event = torch.cuda.Event(enable_timing=True)
-        self.total_duration_ms = 0.0
-        self.wordy = False # set to true will make it output time for every attention call, slowing down overall generation.
+        
 
         if self.use_cluster_fusion:
-            def get_weights_hook(self):
-                normal_qkv = nn.Linear(args.dim, 3 * args.dim, bias=False)
-                normal_qkv = normal_qkv.to(device='cuda', dtype=torch.float16)
-                
-                with torch.no_grad():
-
-                    if hasattr(self.wq, 'weight') and self.wq.weight is not None:
-                        qw_shape = self.wq.weight.shape
-                        
-                        normal_qkv.weight.data[:args.dim] = self.wq.weight.data.T
-                        normal_qkv.weight.data[args.dim:2*args.dim] = self.wk.weight.data.T
-                        normal_qkv.weight.data[2*args.dim:] = self.wv.weight.data.T
-                    wo_weight = None
-                    if hasattr(self.wo, 'weight') and self.wo.weight is not None:
-                        wo_weight = self.wo.weight.data.T.contiguous()
-                        
-                return normal_qkv.weight.data, wo_weight
-            
-            self._get_weights_hook = get_weights_hook
+            head_dim = args.dim // args.n_heads
+            freqs_cis = precompute_freqs_cis(head_dim, args.max_seq_len * 2)  # (L, head_dim/2)
+            cos = torch.repeat_interleave(freqs_cis.real, 2, dim=-1)  # (L, head_dim)
+            sin = torch.repeat_interleave(freqs_cis.imag, 2, dim=-1)  # (L, head_dim)
+            # 注册为 buffer，随模型迁移设备/精度，不写入 checkpoint
+            self.register_buffer("rotary_cos", cos, persistent=False)
+            self.register_buffer("rotary_sin", sin, persistent=False)
+            self.weight_qkv = None
+            self.weight_o = None
             self.weights_initialized = False
+            def _post_load_hook(module, incompatible_keys):
+                module._build_cf_weights()
+
+            self.register_load_state_dict_post_hook(_post_load_hook)
+            self.weights_initialized = False
+
+    def _build_cf_weights(self):
+        """
+        在权重全部 ready（如 load_state_dict 之后）构建 cluster_fusion 需要的 fused 权重。
+        """
+        if not self.use_cluster_fusion:
+            return
+        with torch.no_grad():
+            world = fs_init.get_model_parallel_world_size()
+            # 收集完整权重（world_size>1 时用 master weight）
+            if world == 1:
+                wq_full = self.wq.weight.data         # [dim, dim]
+                wk_full = self.wk.weight.data         # [dim, dim]
+                wv_full = self.wv.weight.data         # [dim, dim]
+                wo_full = self.wo.weight.data         # [dim, dim]
+            else:
+                # fairscale 提供的聚合 API
+                wq_full = self.wq.get_master_weight().data     # [dim, dim]
+                wk_full = self.wk.get_master_weight().data     # [dim, dim]
+                wv_full = self.wv.get_master_weight().data     # [dim, dim]
+                wo_full = self.wo.get_master_weight().data     # [dim, dim]
+
+            args_dim = wq_full.shape[0]
+            device = wq_full.device
+            dtype = wq_full.dtype
+
+            normal_qkv = torch.empty(3 * args_dim, args_dim, device=device, dtype=dtype)
+            normal_qkv[:args_dim] = wq_full.t().contiguous()
+            normal_qkv[args_dim:2*args_dim] = wk_full.t().contiguous()
+            normal_qkv[2*args_dim:] = wv_full.t().contiguous()
+
+            wo_weight = wo_full.t().contiguous()
+
+            want_dtype = torch.float16 if device.type == "cuda" else dtype
+            self.weight_qkv = normal_qkv.to(dtype=want_dtype)
+            self.weight_o = wo_weight.to(dtype=want_dtype)
+
+            self.weights_initialized = True
+
 
     def forward(
         self,
-        unnormed_x: torch.Tensor,
         x: torch.Tensor,
         start_pos: int,
         freqs_cis: torch.Tensor,
@@ -317,49 +340,27 @@ class Attention(nn.Module):
 
         """
         bsz, seqlen, _ = x.shape
-        if self.use_cluster_fusion and not self.weights_initialized:
-            self.weight_qkv, self.weight_o = self._get_weights_hook(self)
-            self.weights_initialized = True
-            torch.cuda.synchronize()
         if self.use_cluster_fusion and mask is None:
 
-            input_tensor = unnormed_x.view(1, -1)
-            kv_cache_k = self.cache_k[:bsz, :start_pos].contiguous().view(-1, self.n_local_kv_heads * self.head_dim)
-            kv_cache_v = self.cache_v[:bsz, :start_pos].contiguous().view(-1, self.n_local_kv_heads * self.head_dim)
-            rms_input_weight = rms_input_weight.reshape(1, 4096)
-            rms_attn_weight = torch.zeros(self.head_dim, device=x.device)
-            gate_up_proj_weight_fuse = torch.zeros(self.head_dim, device=x.device)
-            down_proj_weight_fuse = torch.zeros(self.head_dim, device=x.device)
-            cos_full = torch.repeat_interleave(freqs_cis.real, 2, dim=-1)  # (seqlen, head_dim)
-            sin_full = torch.repeat_interleave(freqs_cis.imag, 2, dim=-1)  # (seqlen, head_dim)
+            kv_cache_k = self.cache_k[:bsz, :start_pos].view(-1, self.n_local_kv_heads * self.head_dim)
+            kv_cache_v = self.cache_v[:bsz, :start_pos].view(-1, self.n_local_kv_heads * self.head_dim)
         
-            # TODO: Update KV cache in kernel
-            # Update KV cache
-            xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-            
-            xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-            xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-            xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-            xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
-            self.cache_k = self.cache_k.to(xq)
-            self.cache_v = self.cache_v.to(xq)
-            self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-            self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
-
-            output = llama_decoder_layer(
-                input_tensor,          
+            output, xk, xv = llama_decoder_layer(
+                x,          
                 self.weight_qkv,                          
                 self.weight_o,              
                 kv_cache_k,
                 kv_cache_v,           
-                gate_up_proj_weight_fuse,      
-                down_proj_weight_fuse,      
                 rms_input_weight,      
-                rms_attn_weight,       
-                cos_full,                   
-                sin_full               
+                self.rotary_cos[start_pos:start_pos+seqlen].to(device=x.device),
+                self.rotary_sin[start_pos:start_pos+seqlen].to(device=x.device)
             )
             output = output.view(bsz, seqlen, 4096)
+
+            # Update KV Cache
+            self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+            self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+
             return output
         else:
             xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
@@ -387,41 +388,11 @@ class Attention(nn.Module):
             keys = keys.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
             values = values.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
 
-            self.start_event.record()
             output = self.attention_kernel(xq, keys, values, mask)
-            self.end_event.record()
-            torch.cuda.synchronize()
-            
-            duration_ms = self.start_event.elapsed_time(self.end_event)
-            self.total_duration_ms += duration_ms
-
-            self.total_tokens_processed += xq.size(0) * xq.size(2) # bsz * seqlen
-            if xq.size(2) > 1: # prefill
-                self.prefill_duration_ms += duration_ms
-                self.prefill_call_count += 1
-            else: # decode
-                self.decode_duration_ms += duration_ms
-                self.decode_call_count += 1
 
             output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
             output = self.wo(output)
             return output
-
-    # profile summary
-    def print_summary(self, layer_id):
-        print(f"--- layer {layer_id} attention summary ({self.method_name}) ---")
-        if self.prefill_call_count > 0:
-            avg_prefill_time = self.prefill_duration_ms / self.prefill_call_count
-            print(f"  prefill : {self.prefill_duration_ms:.2f} ms total, {self.prefill_call_count} calls, {avg_prefill_time:.2f} ms/call")
-        
-        if self.decode_call_count > 0:
-            avg_decode_time = self.decode_duration_ms / self.decode_call_count
-            avg_decode_token_time = self.decode_duration_ms / self.total_tokens_processed if self.total_tokens_processed > 0 else 0
-            print(f"  decode  : {self.decode_duration_ms:.2f} ms total, {self.decode_call_count} calls, {avg_decode_time:.2f} ms/call")
-            print(f"  tokens processed: {self.total_tokens_processed}, avg time/token: {avg_decode_token_time:.3f} ms")
-        print("-" * (30 + len(self.method_name)))
-
-
 
 class FeedForward(nn.Module):
     def __init__(
@@ -501,6 +472,18 @@ class TransformerBlock(nn.Module):
         self.layer_id = layer_id
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
+        self.use_cluster_fusion = os.getenv("USE_CLUSTER_FUSION", 'false').lower() == 'true'
+        def original_forward(x, start_pos, freqs_cis, mask):
+            return x + self.attention(self.attention_norm(x), start_pos, freqs_cis, mask, self.attention_norm.weight)
+        def clusterfusion_forward(x, start_pos, freq_cis, mask):
+            if mask != None:
+                return x + self.attention(self.attention_norm(x), start_pos, freq_cis, mask, self.attention_norm.weight)
+            else:
+                return x + self.attention(x, start_pos, freq_cis, mask, self.attention_norm.weight)
+        if self.use_cluster_fusion:
+            self.forward_method = clusterfusion_forward
+        else:
+            self.forward_method = original_forward
 
     def forward(
         self,
@@ -522,9 +505,7 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.attention(
-            x, self.attention_norm(x), start_pos, freqs_cis, mask, self.attention_norm.weight
-        )
+        h = self.forward_method(x, start_pos, freqs_cis, mask)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
@@ -616,3 +597,10 @@ class Transformer(nn.Module):
         h = self.norm(h)
         output = self.output(h).float()
         return output
+
+    def prepare_cluster_fusion(self):
+        """
+        在 load_state_dict 之后调用：为所有 Attention 层构建 fused 权重。
+        """
+        for layer in self.layers:
+            layer.attention.prepare_cluster_fusion()

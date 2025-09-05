@@ -1,13 +1,15 @@
-#include "kernel.cuh"
+#include "kernel_sglang.cuh"
 #include <torch/extension.h>
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> llama_decoder_layer_sm120(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_decoder_layer_sglang_sm120(
     torch::Tensor input,
+    torch::Tensor residual,
     torch::Tensor weight_qkv,
     torch::Tensor weight_o,
     torch::Tensor k_cache,
     torch::Tensor v_cache,
     torch::Tensor rms_input_weight,
+    float eps,
     torch::Tensor cos,
     torch::Tensor sin
 ) 
@@ -25,6 +27,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> llama_decoder_layer_sm12
     half* v_ptr = reinterpret_cast<half*>(v.data_ptr<at::Half>());
 
     half* input_ptr = reinterpret_cast<half*>(input.data_ptr<at::Half>());
+    half* residual_ptr = reinterpret_cast<half*>(residual.data_ptr<at::Half>());
     half* weight_qkv_ptr = reinterpret_cast<half*>(weight_qkv.data_ptr<at::Half>());
     half* weight_o_ptr = reinterpret_cast<half*>(weight_o.data_ptr<at::Half>());
     half* k_cache_ptr = reinterpret_cast<half*>(k_cache.data_ptr<at::Half>());
@@ -44,7 +47,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> llama_decoder_layer_sm12
     constexpr uint32_t rank = 2;
     uint64_t size[rank] = {HIDDEN_DIM, 3 * HIDDEN_DIM};
     uint64_t stride[rank - 1] = {HIDDEN_DIM * sizeof(half)};
-    uint32_t box_size[rank] = {HEAD_DIM, TMA_LOAD_ONCE};
+    uint32_t box_size[rank] = {TMA_LOAD_ONCE, HEAD_DIM};
     uint32_t elem_stride[rank] = {1, 1};
     CUresult res = cuTensorMapEncodeTiled(
         &tensor_map_weight,                
@@ -104,7 +107,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> llama_decoder_layer_sm12
 
     uint64_t size_weight_o[rank] = {HIDDEN_DIM, HIDDEN_DIM};
     uint64_t stride_weight_o[rank - 1] = {HIDDEN_DIM * sizeof(half)};
-    uint32_t box_size_weight_o[rank] = {TMA_LOAD_ONCE, HEAD_DIM};
+    uint32_t box_size_weight_o[rank] = {HEAD_DIM, TMA_LOAD_ONCE};
     uint32_t elem_stride_weight_o[rank] = {1, 1};
     CUresult res_weight_o = cuTensorMapEncodeTiled(
         &tensor_map_weight_o,                
@@ -130,7 +133,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> llama_decoder_layer_sm12
         k_ptr,
         v_ptr,
         input_ptr,
+        residual_ptr,
         rms_input_weight_ptr,
+        eps,
         cos_ptr,
         sin_ptr,
         k_cache_ptr,
@@ -143,5 +148,5 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> llama_decoder_layer_sm12
         KV_DIM_PER_BLOCK
     );
     cudaDeviceSynchronize();
-    return std::make_tuple(o, k, v);
+    return std::make_tuple(o, residual, k, v);
 }

@@ -5,6 +5,7 @@ import fire
 
 from llama import Llama
 from typing import List
+import time
 
 def main(
     ckpt_dir: str,
@@ -40,16 +41,35 @@ def main(
         # For these prompts, the expected answer is the natural continuation of the prompt
         "I believe the meaning of life is",
     ]
+    start_time = time.perf_counter()
     results = generator.text_completion(
         prompts,
         max_gen_len=max_gen_len,
         temperature=temperature,
         top_p=top_p,
     )
+    end_time = time.perf_counter()
+    total_time = end_time - start_time
+
+    total_tokens = 0
+    for result in results:
+        # For text_completion, the result format is {'generation': '...'}
+        generated_text = result['generation']
+        tokens = generator.tokenizer.encode(generated_text, bos=False, eos=False)
+        total_tokens += len(tokens)
+
+    tokens_per_second = total_tokens / total_time if total_time > 0 else 0
+
     for prompt, result in zip(prompts, results):
         print(prompt)
         print(f"> {result['generation']}")
         print("\n==================================\n")
+
+    print(f"\n{'='*50}")
+    print(f"Total completion time: {total_time:.3f} seconds")
+    print(f"Total generated tokens: {total_tokens}")
+    print(f"Tokens per second: {tokens_per_second:.2f}")
+    print(f"{'='*50}\n")
 
 
 if __name__ == "__main__":

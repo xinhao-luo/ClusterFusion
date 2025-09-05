@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import flashinfer
 import torch.cuda.nvtx as nvtx
-from clusterfusion import llama_decoder_layer
+import clusterfusion
 
 hidden_size = 4096
 num_heads = 32
@@ -56,12 +56,11 @@ def rotate_half(x):
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
-def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, cos, sin):
+def llama_decode(hidden, residual, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, cos, sin):
     # DEBUG PRINT
     if debug:
         print("----------------------------- python begin -----------------------------")
 
-    residual = torch.zeros(hidden.shape).to(0).half()
     flashinfer.fused_add_rmsnorm(hidden, residual, rms_input_weight, eps)
     residual = hidden
     qkv_new = qkv_proj(hidden).view(3, 32, head_dim)
@@ -71,6 +70,7 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
 
     # DEBUG PRINT
     if debug: 
+        print("normed ref", hidden[..., 0: 128])
         print("before RoPE")
         print(f"q, head_id = {print_head}: first 8, last 8")
         print(f"{q[0, print_head, 0: 8]}")
@@ -79,8 +79,8 @@ def llama_decode(hidden, rms_input_weight, rms_attn_weight, eps, kv_cache, qkv_p
         print(f"{k_new[0, print_head, 0: 8]}")
         print(f"{k_new[0, print_head, 120: 128]}")
 
-    q, k_new = apply_GPT_J_style_rotary_pos_emb(q, k_new, cos, sin)
-    #q, k_new = apply_neox_style_rotary_pos_emb(q, k_new, cos, sin)
+    #q, k_new = apply_GPT_J_style_rotary_pos_emb(q, k_new, cos, sin)
+    q, k_new = apply_neox_style_rotary_pos_emb(q, k_new, cos, sin)
 
     # DEBUG PRINT
     if debug: 
@@ -122,7 +122,8 @@ def test_llama_decode_e2e():
     print(f"seqlen: {seqlen}")
     # Generate random weights
     input_tensor = generate_random_weights((1, hidden_size)).to(0).half()
-    weight_qkv = generate_random_weights((3 * hidden_size, num_heads * head_dim)).to(0).half()
+    residual = generate_random_weights((1, hidden_size)).to(0).half()
+    weight_qkv = generate_random_weights((3 * num_heads * head_dim, hidden_size)).to(0).half()
     weight_o = generate_random_weights((num_heads * head_dim, hidden_size)).to(0).half()
     
     # For llama_decode
@@ -144,46 +145,27 @@ def test_llama_decode_e2e():
     kv_cache_full = generate_random_weights((2, seqlen, num_heads * head_dim)).to(0).half()
 
     # RoPE with cos and sin
-    cos, sin = initialize_rope_embeddings(head_dim)
+    cos, sin = initialize_rope_embeddings(head_dim // 2)
+    cos = torch.cat([cos, cos], dim=-1)
+    sin = torch.cat([sin, sin], dim=-1)
     # Our kernel
     o = []
     for i in range(test_run):
-        output, k, v = llama_decoder_layer(
+        tmp_residual = residual.clone()
+        output, _, k, v = clusterfusion.llama_decoder_layer_batch_decode_sglang(
             input_tensor,          
+            tmp_residual,
             weight_qkv,                          
             weight_o,              
             kv_cache_full[0],
             kv_cache_full[1],           
             rms_input_weight,      
+            1e-6,
             cos,                   
             sin                    
         )
         o.append(output)
 
-    # for i in range(5):
-        # tmp = llama_decoder_layer(
-                # input_tensor,          
-                # weight_qkv,                          
-                # weight_o,              
-                # kv_cache_full[0],
-                # kv_cache_full[1],           
-                # gate_up_proj_weight_fuse,      
-                # down_proj_weight_fuse,      
-                # rms_input_weight,      
-                # rms_attn_weight,       
-                # cos,                   
-                # sin                    
-            # )
-        # if not torch.equal(tmp, o):
-            # print(tmp)
-            # same = False
-# 
-    # if same:
-        # print("Kernel outputs match.")
-    # else:
-        # print("Kernel outputs differ.")
-        # max_error = (tmp - o).abs().max()
-        # print(f"Max error between outputs: {max_error.item()}") 
     eps = 1e-6
     rms_input_weight = rms_input_weight.reshape((hidden_size,))
     rms_attn_weight = rms_attn_weight.reshape((hidden_size,))
@@ -194,9 +176,8 @@ def test_llama_decode_e2e():
     gate_proj = nn.Linear(hidden_size, ffn_dim_gt, bias=False).to(0).half()
     up_proj = nn.Linear(hidden_size, ffn_dim_gt, bias=False).to(0).half()
     down_proj = nn.Linear(ffn_dim_gt, hidden_size, bias=False).to(0).half()
-    weight_qkv = weight_qkv.reshape(3, hidden_size, -1).transpose(0, 1).reshape(hidden_size, -1)
-    qkv_proj.weight.data = weight_qkv.T.contiguous().view(qkv_proj.weight.data.shape)
-    o_proj.weight.data = weight_o.T.contiguous().view(o_proj.weight.data.shape)
+    qkv_proj.weight.data = weight_qkv.contiguous().view(qkv_proj.weight.data.shape)
+    o_proj.weight.data = weight_o.contiguous().view(o_proj.weight.data.shape)
     gate_proj.weight.data = gate_up_proj_weight_gt[:hidden_size, :].T.contiguous().view(gate_proj.weight.data.shape)
     up_proj.weight.data = gate_up_proj_weight_gt[hidden_size:, :].T.contiguous().view(up_proj.weight.data.shape)
     down_proj.weight.data = down_proj_weight_gt.T.contiguous().view(down_proj.weight.data.shape)
@@ -207,7 +188,7 @@ def test_llama_decode_e2e():
     kv_cache_gt = torch.cat([kv_cache_k[:seqlen], kv_cache_v[:seqlen]], dim=0).view(2, seqlen, num_heads, head_dim)
     
     nvtx.range_push("llama_decode")
-    o_gt = llama_decode(input_tensor, rms_input_weight, rms_attn_weight, eps, kv_cache_gt, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, cos, sin)
+    o_gt = llama_decode(input_tensor, residual, rms_input_weight, rms_attn_weight, eps, kv_cache_gt, qkv_proj, o_proj, gate_proj, up_proj, down_proj, head_dim, cos, sin)
     nvtx.range_pop()
     print(o_gt.shape)
     print("o_gt.abs.mean():", o_gt.abs().mean().item())

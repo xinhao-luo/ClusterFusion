@@ -1,3 +1,6 @@
+#ifndef DSM_CUH
+#define DSM_CUH
+
 #include "cuda_runtime.h"                
 #include "cooperative_groups.h"
 #include "cuda_fp16.h"
@@ -75,21 +78,21 @@ __device__ __forceinline__ void __cluster_dims__(cluster_size, 1, 1) dsm_ring_al
         }
         return;
     } else {
+        if (tid == 0) {
+            asm volatile (
+                "mbarrier.init.shared::cta.b64 [%0], %1;"
+                :
+                : "r"(barrier), "r"(1)
+            );
+        }
+        cluster.sync();
         for (int i = 1; i < cluster.num_blocks() - 1; i++) {
             if (tid == 0) {
-                asm volatile (
-                    "mbarrier.init.shared::cta.b64 [%0], %1;"
-                    :
-                    : "r"(barrier), "r"(1)
-                );
                 asm volatile (
                     "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;"
                     :
                     : "r"(barrier), "r"(size)
                 );
-            }
-            cluster.sync();
-            if (tid == 0) {
                 dst_cta = (cluster_block_id + i) % cluster.num_blocks();
                 asm volatile (
                     "mapa.shared::cluster.u32 %0, %1, %2;\n"
@@ -118,7 +121,7 @@ __device__ __forceinline__ void __cluster_dims__(cluster_size, 1, 1) dsm_ring_al
                 "DONE:\n"
                 "}\n"
                 :: "r"(barrier),
-                "r"(0)
+                "r"(i ^ 1)
             );
 
             // Local reduce-add
@@ -137,11 +140,11 @@ __device__ __forceinline__ void __cluster_dims__(cluster_size, 1, 1) dsm_ring_al
             } else if constexpr (stage == Stage::FFN) {
                 if (tid < tile_size / 2) {
                     for (int j = 0; j < 3; j++) {
-                    buffer = *(half2*)(&dst[j * tile_size + tid * 2]);
-                    if (i == cluster.num_blocks() - 2) // ReLU
-                        *(half2*)(&src[j * tile_size + tid * 2]) = __hmax2(__hadd2(*(half2*)(&src[j * tile_size + tid * 2]), buffer), __float22half2_rn({0.0f, 0.0f}));
-                    else
-                        *(half2*)(&src[j * tile_size + tid * 2]) = __hadd2(*(half2*)(&src[j * tile_size + tid * 2]), buffer);
+                        buffer = *(half2*)(&dst[j * tile_size + tid * 2]);
+                        if (i == cluster.num_blocks() - 2) // ReLU
+                            *(half2*)(&src[j * tile_size + tid * 2]) = __hmax2(__hadd2(*(half2*)(&src[j * tile_size + tid * 2]), buffer), __float22half2_rn({0.0f, 0.0f}));
+                        else
+                            *(half2*)(&src[j * tile_size + tid * 2]) = __hadd2(*(half2*)(&src[j * tile_size + tid * 2]), buffer);
                     }
                     for (int j = 0; j < 3; j++) {
                         buffer = *(half2*)(&dst[tile_size * 3 + j * tile_size + tid * 2]);
@@ -151,13 +154,13 @@ __device__ __forceinline__ void __cluster_dims__(cluster_size, 1, 1) dsm_ring_al
             } else if constexpr (stage == Stage::LINEAR_DEEPSEEK) {
                 *(uint4*)(&reg_input[0]) = *(uint4*)(&dst[tid * 8]);
                 for (int di = 0; di < 8; di++) 
-                    src[tid * 8 + di] += reg_input[di];
-                src[tile_size + tid] += dst[tile_size + tid];
+                    src[tid * 8 + di] = __hadd(src[tid * 8 + di], reg_input[di]);
+                src[tile_size + tid] = __hadd(src[tile_size + tid], dst[tile_size + tid]);
             } else if constexpr (stage == Stage::ATTN_DEEPSEEK) {
                 if (tid < tile_size / 8) {
                     *(uint4*)(&reg_input[0]) = *(uint4*)(&dst[tid * 8]);
                     for (int di = 0; di < 8; di++) 
-                        src[tid * 8 + di] += reg_input[di];
+                        src[tid * 8 + di] = __hadd(src[tid * 8 + di], reg_input[di]);
                 }
             } else
                 assert(false && "Unknown stage");
@@ -166,3 +169,5 @@ __device__ __forceinline__ void __cluster_dims__(cluster_size, 1, 1) dsm_ring_al
         }
     }
 }
+
+#endif // DSM_CUH

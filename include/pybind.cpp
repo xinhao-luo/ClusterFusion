@@ -35,16 +35,41 @@ torch::Tensor rmsnorm(
     torch::Tensor weight
 );
 
-torch::Tensor llama_decoder_layer_sm120(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> llama_decoder_layer_sm120(
     torch::Tensor input,
     torch::Tensor weight_qkv,
     torch::Tensor weight_o,
     torch::Tensor k_cache,
     torch::Tensor v_cache,
-    torch::Tensor gate_up_proj_weight,
-    torch::Tensor down_proj_weight,
     torch::Tensor rms_input_weight,
-    torch::Tensor rms_attn_weight,
+    torch::Tensor cos,
+    torch::Tensor sin
+);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> llama_decoder_layer_sglang_sm120(
+    torch::Tensor input,
+    torch::Tensor residual,
+    torch::Tensor weight_qkv,
+    torch::Tensor weight_o,
+    torch::Tensor k_cache,
+    torch::Tensor v_cache,
+    torch::Tensor rms_input_weight,
+    float eps,
+    torch::Tensor cos,
+    torch::Tensor sin
+);
+
+std::tuple<torch::Tensor, torch::Tensor> llama_decoder_layer_batch_sglang_sm120(
+    torch::Tensor input,
+    torch::Tensor residual,
+    torch::Tensor weight_qkv,
+    torch::Tensor weight_o,
+    torch::Tensor paged_kv_indptr,
+    torch::Tensor paged_kv_indices,
+    torch::Tensor k_cache,
+    torch::Tensor v_cache,
+    torch::Tensor rms_input_weight,
+    float eps,
     torch::Tensor cos,
     torch::Tensor sin
 );
@@ -59,5 +84,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #ifdef COMPILE_SM120
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("llama_decoder_layer", &llama_decoder_layer_sm120, "");
+    m.def("llama_decoder_layer_sglang", &llama_decoder_layer_sglang_sm120, "");
+    m.def("llama_decoder_layer_batch_decode_sglang", &llama_decoder_layer_batch_sglang_sm120, "");
 }
 #endif
