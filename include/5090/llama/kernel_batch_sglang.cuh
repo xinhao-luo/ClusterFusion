@@ -318,8 +318,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
     // RoPE
     q_rope = __half2float(local_qkv[tid]);
     k_rope = __half2float(local_qkv[HEAD_DIM + tid]);
-    cos_reg = cos_sin[positions[batch_id] * (HEAD_DIM / 2) + tid % (HEAD_DIM / 2)];
-    sin_reg = cos_sin[positions[batch_id] * (HEAD_DIM / 2) + tid % (HEAD_DIM / 2) + HEAD_DIM / 2];
+    cos_reg = cos_sin[positions[batch_id] * HEAD_DIM + tid % (HEAD_DIM / 2)];
+    sin_reg = cos_sin[positions[batch_id] * HEAD_DIM + tid % (HEAD_DIM / 2) + HEAD_DIM / 2];
     if (tid < HEAD_DIM / 2) {
         q_rope_1 = __half2float(local_qkv[HEAD_DIM / 2 + tid]);
         k_rope_1 = __half2float(local_qkv[HEAD_DIM + HEAD_DIM / 2 + tid]);
