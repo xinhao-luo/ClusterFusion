@@ -70,8 +70,8 @@ std::tuple<torch::Tensor, torch::Tensor> llama_decoder_layer_batch_sglang_sm120(
     torch::Tensor v_cache,
     torch::Tensor rms_input_weight,
     float eps,
-    torch::Tensor cos,
-    torch::Tensor sin
+    torch::Tensor positions,
+    torch::Tensor cos_sin
 );
 
 #ifdef COMPILE_SM90

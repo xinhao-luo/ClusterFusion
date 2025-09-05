@@ -12,8 +12,8 @@ std::tuple<torch::Tensor, torch::Tensor> llama_decoder_layer_batch_sglang_sm120(
     torch::Tensor v_cache,
     torch::Tensor rms_input_weight,
     float eps,
-    torch::Tensor cos,
-    torch::Tensor sin
+    torch::Tensor positions,
+    torch::Tensor cos_sin
 ) 
 {
     cudaFuncSetAttribute(LlamaDecoderLayerBatchDecodeWithPagedKVCacheKernel, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
@@ -38,8 +38,8 @@ std::tuple<torch::Tensor, torch::Tensor> llama_decoder_layer_batch_sglang_sm120(
     half* k_cache_ptr = reinterpret_cast<half*>(k_cache.data_ptr<at::Half>());
     half* v_cache_ptr = reinterpret_cast<half*>(v_cache.data_ptr<at::Half>());
     half* rms_input_weight_ptr = reinterpret_cast<half*>(rms_input_weight.data_ptr<at::Half>());
-    float* cos_ptr = reinterpret_cast<float*>(cos.data_ptr<float>());
-    float* sin_ptr = reinterpret_cast<float*>(sin.data_ptr<float>());
+    long long* positions_ptr = reinterpret_cast<long long*>(positions.data_ptr<long long>());
+    float* cos_sin_ptr = reinterpret_cast<float*>(cos_sin.data_ptr<float>());
     int* paged_kv_indptr_ptr = reinterpret_cast<int*>(paged_kv_indptr.data_ptr<int>());
     int* paged_kv_indices_ptr = reinterpret_cast<int*>(paged_kv_indices.data_ptr<int>());
     
@@ -96,8 +96,8 @@ std::tuple<torch::Tensor, torch::Tensor> llama_decoder_layer_batch_sglang_sm120(
         residual_output_ptr,
         rms_input_weight_ptr,
         eps,
-        cos_ptr,
-        sin_ptr,
+        positions_ptr,
+        cos_sin_ptr,
         k_cache_ptr,
         v_cache_ptr,
         paged_kv_indptr_ptr,
