@@ -86,7 +86,6 @@ void llama_decoder_layer_batch_sglang_sm120(
     dim3 grid(HEAD_NUM * CLUSTER_SIZE * batch_size); 
     dim3 block(BLOCK_SIZE);
 
-    cudaDeviceSynchronize();
     LlamaDecoderLayerBatchDecodeWithPagedKVCacheKernel<<<grid, block, max_shmem_size>>>(
         o_ptr,
         input_ptr,
@@ -104,7 +103,6 @@ void llama_decoder_layer_batch_sglang_sm120(
         tensor_map_weight,
         tensor_map_weight_o
     );
-    cudaDeviceSynchronize();
 
     return;
 }
