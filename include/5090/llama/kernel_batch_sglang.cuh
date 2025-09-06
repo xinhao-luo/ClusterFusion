@@ -621,6 +621,10 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, &local_qkv[2 * HEAD_DIM], weight);
 
+    // Set output buffer to zero
+    *(uint4*)(&output[batch_id * HIDDEN_DIM + cluster_block_st_id + tid * NUM_PER_THREAD]) = {0, 0, 0, 0};
+    block.sync();
+
     // Compute output @ w_o
     // Preload w_o
     if (tid == 0) {
