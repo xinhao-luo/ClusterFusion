@@ -5,18 +5,7 @@ from typing import Any, List, Literal, Optional, Tuple, Union, overload
 
 import torch
 
-from .jit import (
-    gen_batch_decode_module,
-    gen_customize_batch_decode_module,
-    gen_customize_batch_prefill_module,
-    get_batch_decode_uri,
-    get_batch_prefill_uri,
-)
 from .page import get_seq_lens
-from .prefill import (
-    get_batch_prefill_jit_module,
-    get_batch_prefill_module,
-)
 from .utils import (
     MaskMode,
     PosEncodingMode,
@@ -30,182 +19,7 @@ from .utils import (
     _unpack_paged_kv_cache,
     canonicalize_torch_dtype,
     device_support_pdl,
-    get_device_sm_count,
-    register_custom_op,
-    register_fake_op,
 )
-
-@functools.cache
-def get_batch_decode_jit_module(module_name: str, jit_module: Any):
-    plan_func = jit_module.plan.default
-    run_func = jit_module.run.default
-
-    @register_custom_op(
-        f"flashinfer::{module_name}_run",
-        mutates_args=(
-            "float_workspace_buffer",
-            "int_workspace_buffer",
-            "paged_k_cache",
-            "paged_v_cache",
-            "o",
-            "maybe_lse",
-        ),
-    )
-    def run_batch_decode(
-        float_workspace_buffer: torch.Tensor,
-        int_workspace_buffer: torch.Tensor,
-        plan_info_vec: List[int],
-        q: torch.Tensor,
-        paged_k_cache: Optional[torch.Tensor],
-        paged_v_cache: Optional[torch.Tensor],
-        paged_kv_indptr: torch.Tensor,
-        paged_kv_indices: torch.Tensor,
-        paged_kv_last_page_len: torch.Tensor,
-        o: torch.Tensor,
-        maybe_lse: Optional[torch.Tensor],
-        kv_layout_code: int,
-        window_left: int,
-        enable_pdl: bool,
-        *args,
-    ) -> None:
-        run_func(
-            float_workspace_buffer,
-            int_workspace_buffer,
-            plan_info_vec,
-            q,
-            paged_k_cache,
-            paged_v_cache,
-            paged_kv_indptr,
-            paged_kv_indices,
-            paged_kv_last_page_len,
-            o,
-            maybe_lse,
-            kv_layout_code,
-            window_left,
-            enable_pdl,
-            *args,
-        )
-
-    @register_fake_op(f"flashinfer::{module_name}_run")
-    def _fake_run_batch_decode(
-        float_workspace_buffer: torch.Tensor,
-        int_workspace_buffer: torch.Tensor,
-        plan_info_vec: List[int],
-        q: torch.Tensor,
-        paged_k_cache: Optional[torch.Tensor],
-        paged_v_cache: Optional[torch.Tensor],
-        paged_kv_indptr: torch.Tensor,
-        paged_kv_indices: torch.Tensor,
-        paged_kv_last_page_len: torch.Tensor,
-        o: torch.Tensor,
-        maybe_lse: Optional[torch.Tensor],
-        kv_layout_code: int,
-        window_left: int,
-        enable_pdl: bool,
-        *args,
-    ) -> None:
-        pass
-
-    return SimpleNamespace(
-        plan=plan_func,
-        run=run_batch_decode,
-    )
-
-@functools.cache
-def get_batch_decode_module(*args):
-    uri = get_batch_decode_uri(*args)
-    mod = gen_batch_decode_module(*args).build_and_load()
-    plan_func = mod.plan.default
-    run_func = mod.run.default
-
-    # torch library for batch_decode_with_paged_kv_cache_run
-
-    @register_custom_op(
-        f"flashinfer::{uri}_run",
-        mutates_args=(
-            "float_workspace_buffer",
-            "int_workspace_buffer",
-            "paged_k_cache",
-            "paged_v_cache",
-            "o",
-            "maybe_lse",
-        ),
-    )
-    def run_batch_decode(
-        float_workspace_buffer: torch.Tensor,
-        int_workspace_buffer: torch.Tensor,
-        plan_info_vec: List[int],
-        q: torch.Tensor,
-        paged_k_cache: Optional[torch.Tensor],
-        paged_v_cache: Optional[torch.Tensor],
-        paged_kv_indptr: torch.Tensor,
-        paged_kv_indices: torch.Tensor,
-        paged_kv_last_page_len: torch.Tensor,
-        o: torch.Tensor,
-        maybe_lse: Optional[torch.Tensor],
-        kv_layout_code: int,
-        window_left: int,
-        enable_pdl: bool,
-        alibi_slopes: Optional[torch.Tensor],
-        logits_soft_cap: float,
-        sm_scale: float,
-        rope_scale: float,
-        rope_theta: float,
-    ) -> None:
-        run_func(
-            float_workspace_buffer,
-            int_workspace_buffer,
-            plan_info_vec,
-            q,
-            paged_k_cache,
-            paged_v_cache,
-            paged_kv_indptr,
-            paged_kv_indices,
-            paged_kv_last_page_len,
-            o,
-            maybe_lse,
-            kv_layout_code,
-            window_left,
-            enable_pdl,
-            alibi_slopes,
-            logits_soft_cap,
-            sm_scale,
-            1.0 / rope_scale,  # rope_rcp_scale
-            1.0 / rope_theta,  # rope_rcp_theta
-        )
-
-    @register_fake_op(f"flashinfer::{uri}_run")
-    def _fake_run_batch_decode(
-        float_workspace_buffer: torch.Tensor,
-        int_workspace_buffer: torch.Tensor,
-        plan_info_vec: List[int],
-        q: torch.Tensor,
-        paged_k_cache: Optional[torch.Tensor],
-        paged_v_cache: Optional[torch.Tensor],
-        paged_kv_indptr: torch.Tensor,
-        paged_kv_indices: torch.Tensor,
-        paged_kv_last_page_len: torch.Tensor,
-        o: torch.Tensor,
-        maybe_lse: Optional[torch.Tensor],
-        kv_layout_code: int,
-        window_left: int,
-        enable_pdl: bool,
-        alibi_slopes: Optional[torch.Tensor],
-        logits_soft_cap: float,
-        sm_scale: float,
-        rope_scale: float,
-        rope_theta: float,
-    ) -> None:
-        pass
-
-    # Register the module.
-    #
-    # Note that plan is not part of model logic. It should not be included in
-    # Cuda Graph or torch.compile. So, we don't provide a torch library for plan.
-    return SimpleNamespace(
-        plan=plan_func,
-        run=run_batch_decode,
-    )
 
 class BatchDecodeWithPagedKVCacheWrapper:
     r"""Wrapper class for decode attention with paged kv-cache (first proposed in
@@ -221,8 +35,7 @@ class BatchDecodeWithPagedKVCacheWrapper:
         paged_kv_indptr_buffer: Optional[torch.Tensor] = None,
         paged_kv_indices_buffer: Optional[torch.Tensor] = None,
         paged_kv_last_page_len_buffer: Optional[torch.Tensor] = None,
-        backend: str = "auto",
-        jit_args: Optional[List[Any]] = None,
+        backend: str = "clusterfusion",
     ) -> None:
         r"""Constructor of :class:`BatchDecodeWithPagedKVCacheWrapper`.
 
@@ -262,31 +75,12 @@ class BatchDecodeWithPagedKVCacheWrapper:
             Only needed when ``use_cuda_graph`` is ``True``.
 
         backend : str
-            The implementation backend, could be ``auto``/``fa2`` or ``clusterfusion``. Defaults to ``auto``.
+            The implementation backend, could be ``auto``/``fa2`` or ``clusterfusion``. Defaults to ``clusterfusion``.
             If set to ``auto``, the wrapper will automatically choose the backend based on the
             device architecture and kernel availability.
 
-        jit_args : Optional[List[Any]]
-            If provided, the wrapper will use the provided arguments to create the JIT module,
-            otherwise, the wrapper will use default attention implementation.
         """
         _check_kv_layout(kv_layout)
-
-        if jit_args is not None:
-            if use_tensor_cores:
-                self._jit_module = get_batch_prefill_jit_module(
-                    jit_args[0],
-                    gen_customize_batch_prefill_module(
-                        "fa2", *jit_args
-                    ).build_and_load(),
-                )
-            else:
-                self._jit_module = get_batch_decode_jit_module(
-                    jit_args[0],
-                    gen_customize_batch_decode_module(*jit_args).build_and_load(),
-                )
-        else:
-            self._jit_module = None
 
         self._kv_layout = kv_layout
         self._float_workspace_buffer = float_workspace_buffer
@@ -328,7 +122,7 @@ class BatchDecodeWithPagedKVCacheWrapper:
         self._paged_kv_indptr_buf = paged_kv_indptr_buffer
         self._paged_kv_indices_buf = paged_kv_indices_buffer
         self._paged_kv_last_page_len_buf = paged_kv_last_page_len_buffer
-        # TODO: comfirm that clusterfusion uses tensor cores
+        # TODO(ChiHeng): comfirm that clusterfusion uses tensor cores
         self._use_tensor_cores = use_tensor_cores or backend == "clusterfusion"
         self._use_cuda_graph = use_cuda_graph
 
@@ -383,7 +177,7 @@ class BatchDecodeWithPagedKVCacheWrapper:
         num_kv_heads: int,
         head_dim: int,
         page_size: int,
-        pos_encoding_mode: str = "NONE",
+        pos_encoding_mode: str = "ROPE_LLAMA",
         window_left: int = -1,
         logits_soft_cap: Optional[float] = None,
         q_data_type: Optional[Union[str, torch.dtype]] = "float16",
@@ -418,7 +212,7 @@ class BatchDecodeWithPagedKVCacheWrapper:
         pos_encoding_mode : str
             The position encoding applied inside attention kernels, could be
             ``NONE``/``ROPE_LLAMA`` (LLAMA style rotary embedding) /``ALIBI``.
-            Defaults to ``NONE``.
+            Defaults to ``ROPE_LLAMA``.
         window_left : int
             The left (inclusive) window size for the attention window, when set to ``-1``, the window
             size will be set to the full length of the sequence. Defaults to ``-1``.
@@ -521,114 +315,10 @@ class BatchDecodeWithPagedKVCacheWrapper:
         else:
             kv_lens_arr_host = seq_lens.cpu()
         # TODO(Chiheng): switch to clusterfusion
-        if self._backend == "clusterfusion":
-            assert self._kv_layout == "NHD", "ClusterFusion backend only supports NHD layout"
-            self._max_kv_len = max(kv_lens_arr_host).item()
-            self._kv_lens_buffer[: len(kv_lens_arr_host)].copy_(
-                kv_lens_arr_host, non_blocking=non_blocking
-            )
-            if self._block_tables is None:
-                blocks_per_seq = [
-                    (seq_len + page_size - 1) // page_size
-                    for seq_len in kv_lens_arr_host
-                ]
-                max_num_blocks_per_seq = max(blocks_per_seq)
-                self._block_tables = torch.zeros(
-                    (batch_size, max_num_blocks_per_seq),
-                    dtype=torch.int,
-                    device=self.device,
-                )
-                block_id = indptr[0]
-                for i in range(batch_size):
-                    num_blocks_needed = blocks_per_seq[i]
-                    self._block_tables[i, :num_blocks_needed] = (
-                        self._paged_kv_indices_buf[
-                            block_id : block_id + num_blocks_needed
-                        ]
-                    )
-                    block_id += num_blocks_needed
-            self._cached_module = get_trtllm_gen_decode_module(
-                q_data_type,
-                kv_data_type,
-                q_data_type,
-                indptr.dtype,
-                head_dim,
-                head_dim,
-                PosEncodingMode[pos_encoding_mode].value,
-                window_left >= 0,  # use_sliding_window
-                logits_soft_cap > 0,  # use_logits_soft_cap
-                False,  # use_fp16_qk_reduction
-            )
-            self._plan_info = self._cached_module.plan()  # None
-        elif self.use_tensor_cores:
-            self._max_kv_len = max(kv_lens_arr_host).item()
-            if self._jit_module is not None:
-                self._cached_module = self._jit_module
-            else:
-                self._cached_module = get_batch_prefill_module(
-                    "fa2",
-                    q_data_type,
-                    kv_data_type,
-                    q_data_type,
-                    indptr.dtype,
-                    head_dim,  # head_dim_qk
-                    head_dim,  # head_dim_vo
-                    PosEncodingMode[pos_encoding_mode].value,
-                    window_left != -1,  # use_sliding_window
-                    logits_soft_cap > 0,  # use_logits_soft_cap
-                    False,  # use_fp16_qk_reduction
-                )
-
-            self._plan_info = self._cached_module.plan(
-                self._float_workspace_buffer,
-                self._int_workspace_buffer,
-                self._pin_memory_int_workspace_buffer,
-                qo_indptr_host,
-                indptr_host,
-                kv_lens_arr_host,
-                batch_size,  # total_num_rows
-                batch_size,
-                num_qo_heads,
-                num_kv_heads,
-                page_size,
-                self.is_cuda_graph_enabled,
-                head_dim,
-                head_dim,
-                False,  # causal
-            )
-        else:
-            if self._jit_module is not None:
-                self._cached_module = self._jit_module
-            else:
-                self._cached_module = get_batch_decode_module(
-                    q_data_type,
-                    kv_data_type,
-                    q_data_type,
-                    indptr.dtype,
-                    head_dim,  # head_dim_qk
-                    head_dim,  # head_dim_vo
-                    PosEncodingMode[pos_encoding_mode].value,
-                    window_left != -1,  # use_sliding_window
-                    logits_soft_cap > 0,  # use_logits_soft_cap
-                )
-
-            self._plan_info = self._cached_module.plan(
-                self._float_workspace_buffer,
-                self._int_workspace_buffer,
-                self._pin_memory_int_workspace_buffer,
-                indptr_host,
-                batch_size,
-                num_qo_heads,
-                num_kv_heads,
-                page_size,
-                self.is_cuda_graph_enabled,
-                window_left,
-                logits_soft_cap,
-                head_dim,
-                head_dim,
-                torch.empty(0, dtype=q_data_type),
-                torch.empty(0, dtype=kv_data_type),
-            )
+        
+        assert self._kv_layout == "NHD", "ClusterFusion backend only supports NHD layout"
+        self._plan_info = self._cached_module.plan()
+        
 
         self._pos_encoding_mode = pos_encoding_mode
         self._window_left = window_left
@@ -931,177 +621,3 @@ class BatchDecodeWithPagedKVCacheWrapper:
     def end_forward(self) -> None:
         r"""Warning: this function is deprecated and has no effect."""
         pass
-
-# TODO(Chiheng): switch to clusterfusion
-class TrtllmGenDecodeModule:
-    def _paged_run(
-        self,
-        query: torch.Tensor,
-        kv_cache: torch.Tensor,
-        workspace_buffer: torch.Tensor,
-        block_tables: torch.Tensor,
-        seq_lens: torch.Tensor,
-        max_seq_len: int,
-        bmm1_scale: float,  # todo(Yingyi): add dynamic scale tensor later
-        bmm2_scale: float,
-        window_left: int = -1,
-        out: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        if out is None:
-            out = torch.empty_like(query)
-        if self._sm_count is None:
-            self._sm_count = get_device_sm_count(query.device)
-        self._op.trtllm_paged_attention_decode(
-            out,
-            query.unsqueeze(
-                1
-            ),  # [B, 1, H, D], no MTP here so second dim is 1 # todo(Yingyi): add MTP??
-            kv_cache,
-            workspace_buffer,
-            block_tables,
-            seq_lens,
-            max_seq_len,
-            bmm1_scale,
-            bmm2_scale,
-            window_left,
-            self._sm_count,
-        )
-        return out
-
-    def _plan(self, *args, **kwargs):
-        pass
-
-    def __init__(self):
-        self._sm_count: Optional[int] = None
-        self._mod = trtllm_gen_fmha_module()
-        self._op = self._mod.build_and_load()
-        from flashinfer.jit.cubin_loader import (
-            setup_cubin_loader,
-            setup_metainfo_loader,
-        )
-
-        setup_cubin_loader(self._mod.get_library_path())
-        setup_metainfo_loader(self._mod.get_library_path())
-
-# TODO(Chiheng): switch to clusterfusion
-@functools.cache
-def get_trtllm_gen_decode_module(*args):
-    uri = get_batch_prefill_uri("trtllm-gen", *args)
-    module = TrtllmGenDecodeModule()
-
-    @register_custom_op(
-        f"flashinfer::{uri}_ragged_run",
-        mutates_args=(
-            "float_workspace_buffer",
-            "int_workspace_buffer",
-            "o",
-            "maybe_lse",
-        ),
-    )
-    def paged_run(
-        float_workspace_buffer: torch.Tensor,
-        int_workspace_buffer: torch.Tensor,
-        plan_info_vec: List[int],
-        q: torch.Tensor,
-        paged_k_cache: torch.Tensor,
-        paged_v_cache: torch.Tensor,
-        qo_indptr: torch.Tensor,
-        paged_kv_indptr: torch.Tensor,
-        paged_kv_indices: torch.Tensor,
-        paged_kv_last_page_len: torch.Tensor,
-        o: torch.Tensor,
-        maybe_lse: Optional[torch.Tensor],
-        mask_mode: int,
-        layout: int,
-        window_left: int,
-        enable_pdl: bool,
-        maybe_custom_mask: Optional[torch.Tensor],
-        maybe_mask_indptr: Optional[torch.Tensor],
-        maybe_alibi_slopes: Optional[torch.Tensor],
-        maybe_prefix_len_ptr: Optional[torch.Tensor],
-        maybe_token_pos_in_items_ptr: Optional[torch.Tensor],
-        maybe_max_item_len_ptr: Optional[torch.Tensor],
-        logits_soft_cap: float,
-        sm_scale: float,
-        scale_q: Optional[torch.Tensor],
-        scale_k: Optional[torch.Tensor],
-        scale_v: Optional[torch.Tensor],
-        rope_scale: float,
-        rope_theta: float,
-        token_pos_in_items_len: int,
-        paged_kv_cache: Optional[torch.Tensor] = None,
-        num_qo_heads: Optional[int] = None,
-        num_kv_heads: Optional[int] = None,
-        block_tables: Optional[torch.Tensor] = None,
-        kv_lens_buffer: Optional[torch.Tensor] = None,
-        page_size: Optional[int] = None,
-        max_kv_len: Optional[int] = None,
-    ) -> None:
-        assert maybe_lse is None
-        assert paged_kv_cache is not None
-        assert num_qo_heads is not None
-        assert num_kv_heads is not None
-        assert block_tables is not None
-        assert kv_lens_buffer is not None
-        assert page_size is not None
-        assert max_kv_len is not None
-        o = module._paged_run(
-            q.contiguous(),  # NOTE(Siyuan): without contiguous, the result is incorrect
-            paged_kv_cache,
-            int_workspace_buffer,
-            block_tables,
-            kv_lens_buffer,
-            max_kv_len,
-            sm_scale,
-            1.0,  # NOTE(Siyuan): update this to expose bmm2 scale
-            window_left,
-            out=o,
-        )
-
-    @register_fake_op(f"flashinfer::{uri}_paged_run")
-    def _fake_paged_run(
-        float_workspace_buffer: torch.Tensor,
-        int_workspace_buffer: torch.Tensor,
-        plan_info_vec: List[int],
-        q: torch.Tensor,
-        paged_k_cache: torch.Tensor,
-        paged_v_cache: torch.Tensor,
-        qo_indptr: torch.Tensor,
-        paged_kv_indptr: torch.Tensor,
-        paged_kv_indices: torch.Tensor,
-        paged_kv_last_page_len: torch.Tensor,
-        o: torch.Tensor,
-        maybe_lse: Optional[torch.Tensor],
-        mask_mode: int,
-        layout: int,
-        window_left: int,
-        enable_pdl: bool,
-        maybe_custom_mask: Optional[torch.Tensor],
-        maybe_mask_indptr: Optional[torch.Tensor],
-        maybe_alibi_slopes: Optional[torch.Tensor],
-        maybe_prefix_len_ptr: Optional[torch.Tensor],
-        maybe_token_pos_in_items_ptr: Optional[torch.Tensor],
-        maybe_max_item_len_ptr: Optional[torch.Tensor],
-        logits_soft_cap: float,
-        sm_scale: float,
-        rope_scale: float,
-        rope_theta: float,
-        token_pos_in_items_len: int,
-        paged_kv_cache: Optional[torch.Tensor] = None,
-        num_qo_heads: Optional[int] = None,
-        num_kv_heads: Optional[int] = None,
-        block_tables: Optional[torch.Tensor] = None,
-        kv_lens_buffer: Optional[torch.Tensor] = None,
-        page_size: Optional[int] = None,
-        max_kv_len: Optional[int] = None,
-    ) -> None:
-        pass
-
-    # Register the module.
-    #
-    # Note that plan is not part of model logic. It should not be included in
-    # Cuda Graph or torch.compile. So, we don't provide a torch library for plan.
-    return SimpleNamespace(
-        plan=module._plan,
-        paged_run=paged_run,
-    )

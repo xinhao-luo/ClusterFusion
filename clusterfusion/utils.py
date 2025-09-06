@@ -1,8 +1,10 @@
 import math
 from enum import Enum
-from typing import Dict, Tuple, Union, Sequence
+from typing import Dict, Tuple, Union, Sequence, Optional, Callable, Iterable
 
 import torch
+from torch.torch_version import TorchVersion
+from torch.torch_version import __version__ as torch_version
 
 class PosEncodingMode(Enum):
     NONE = 0
@@ -170,3 +172,52 @@ def _check_shape_dtype_device(
 def device_support_pdl(device: torch.device) -> bool:
     major, _ = get_compute_capability(device)
     return major >= 9
+
+if TorchVersion(torch_version) < TorchVersion("2.4"):
+
+    def register_custom_op(
+        name: str,
+        fn: Optional[Callable] = None,
+        /,
+        *,
+        mutates_args: Union[str, Iterable[str]],
+        device_types: Optional[Union[str, Sequence[str]]] = None,
+        schema: Optional[str] = None,
+    ) -> Callable:
+        return lambda x: x
+
+    def register_fake_op(
+        name: str,
+        fn: Optional[Callable] = None,
+    ) -> Callable:
+        return lambda x: x
+
+else:
+
+    def register_custom_op(
+        name: str,
+        fn: Optional[Callable] = None,
+        /,
+        *,
+        mutates_args: Union[str, Iterable[str]],
+        device_types: Optional[Union[str, Sequence[str]]] = None,
+        schema: Optional[str] = None,
+    ) -> Callable:
+        # NOTE(Zihao): torch.library.custom_op has significant overhead as mentioned in the following link
+        # https://github.com/vllm-project/vllm/blob/36e76700453924c8d421db99af70a88a1df835cd/vllm/utils.py#L1660-L1674
+
+        # return torch.library.custom_op(
+        #     name,
+        #     fn,
+        #     mutates_args=mutates_args,
+        #     device_types=device_types,
+        #     schema=schema,
+        # )
+        return lambda x: x
+
+    def register_fake_op(
+        name: str,
+        fn: Optional[Callable] = None,
+    ) -> Callable:
+        # return torch.library.register_fake(name, fn)
+        return lambda x: x
