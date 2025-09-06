@@ -43,8 +43,8 @@ def check_cuda_arch():
     # cuda arch check for fp8 at the moment.
     for cuda_arch_flags in torch_cpp_ext._get_cuda_arch_flags():
         arch = int(re.search(r"compute_(\d+)", cuda_arch_flags).group(1))
-        if arch < 90:
-            raise RuntimeError("ClusterFusion requires sm90+")
+        if arch < 75:
+            raise RuntimeError("FlashInfer requires sm75+")
         
 sm90a_nvcc_flags = ["-gencode=arch=compute_90a,code=sm_90a"]
 
