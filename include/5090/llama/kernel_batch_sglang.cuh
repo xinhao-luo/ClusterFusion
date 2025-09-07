@@ -47,10 +47,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
     half* residual_output,
     half* w_rms_input,   // hidden_dim
     float eps,
-    float* cos,          // batch_size * head_dim // 2
-    float* sin,          // batch_size * head_dim // 2
-    half* k_cache,
-    half* v_cache,
+    int64_t* positions,
+    float* cos_sin,
+    uint64_t* k_cache_ptrs,
+    uint64_t* v_cache_ptrs,
+    int layer_id,
     int* paged_kv_indptr,
     int* paged_kv_indices,
     const __grid_constant__ CUtensorMap tensor_map, // 3 * hidden_dim * hidden_dim
@@ -116,6 +117,8 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
     uint weight_idx_3 = warp_id * NUM_ROW_PER_WARP_3 + lane_id / NUM_THREAD_PER_ROW_3;
     uint cluster_block_st_id = cluster_block_id * DIM_PER_BLOCK;
     uint cluster_head_idx = head_id * HEAD_DIM;
+    half* k_cache = reinterpret_cast<half*>(k_cache_ptrs[layer_id]);
+    half* v_cache = reinterpret_cast<half*>(v_cache_ptrs[layer_id]);
     int start_idx = paged_kv_indptr[batch_id];
     int end_idx = paged_kv_indptr[batch_id + 1] - 1;
     const uint32_t SEQ_LEN = end_idx - start_idx;
@@ -315,10 +318,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, local_qkv, weight);
 
+    // RoPE
     q_rope = __half2float(local_qkv[tid]);
     k_rope = __half2float(local_qkv[HEAD_DIM + tid]);
-    cos_reg = cos[(batch_id * (HEAD_DIM / 2)) + (tid % (HEAD_DIM / 2))];
-    sin_reg = sin[(batch_id * (HEAD_DIM / 2)) + (tid % (HEAD_DIM / 2))];
+    cos_reg = cos_sin[positions[batch_id] * HEAD_DIM + tid % (HEAD_DIM / 2)];
+    sin_reg = cos_sin[positions[batch_id] * HEAD_DIM + tid % (HEAD_DIM / 2) + HEAD_DIM / 2];
     if (tid < HEAD_DIM / 2) {
         q_rope_1 = __half2float(local_qkv[HEAD_DIM / 2 + tid]);
         k_rope_1 = __half2float(local_qkv[HEAD_DIM + HEAD_DIM / 2 + tid]);
@@ -616,6 +620,10 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerBatchDecod
         size, tid, HEAD_DIM, cluster_block_id,  
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, &local_qkv[2 * HEAD_DIM], weight);
+
+    // Set output buffer to zero
+    *(uint4*)(&output[batch_id * HIDDEN_DIM + cluster_block_st_id + tid * NUM_PER_THREAD]) = {0, 0, 0, 0};
+    block.sync();
 
     // Compute output @ w_o
     // Preload w_o

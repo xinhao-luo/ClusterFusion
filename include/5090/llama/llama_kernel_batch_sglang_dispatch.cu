@@ -1,20 +1,25 @@
 #include "kernel_batch_sglang.cuh"
 #include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
 
-std::tuple<torch::Tensor, torch::Tensor> llama_decoder_layer_batch_sglang_sm120(
+
+void llama_decoder_layer_batch_sglang_sm120(
+    torch::Tensor output,
+    torch::Tensor residual_output,
     torch::Tensor input,
     torch::Tensor residual,
     torch::Tensor weight_qkv,
     torch::Tensor weight_o,
     torch::Tensor paged_kv_indptr,
     torch::Tensor paged_kv_indices,
-    torch::Tensor k_cache,
-    torch::Tensor v_cache,
+    torch::Tensor k_cache_ptrs,
+    torch::Tensor v_cache_ptrs,
+    int layer_id,
     torch::Tensor rms_input_weight,
     float eps,
-    torch::Tensor cos,
-    torch::Tensor sin
-) 
+    torch::Tensor positions,
+    torch::Tensor cos_sin
+)
 {
     cudaFuncSetAttribute(LlamaDecoderLayerBatchDecodeWithPagedKVCacheKernel, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
     // uint32_t max_shmem_size = ((((DIM_PER_BLOCK * sizeof(half) + 2 * DIM_BLOCK_REDUCE * sizeof(float) + 127) & ~127) +  2 * TMA_LOAD_ONCE * MAX_SMEM_DIM * sizeof(half) + 127) & ~127) + (3 * HEAD_DIM) * sizeof(half);
@@ -22,24 +27,21 @@ std::tuple<torch::Tensor, torch::Tensor> llama_decoder_layer_batch_sglang_sm120(
     cudaFuncSetAttribute(LlamaDecoderLayerBatchDecodeWithPagedKVCacheKernel, cudaFuncAttributeMaxDynamicSharedMemorySize, max_shmem_size);
     auto options = torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA, 0);
 
-    uint32_t batch_size = input.size(0);
-    torch::Tensor o = torch::full({batch_size, HIDDEN_DIM}, 0, options);
-    torch::Tensor residual_output = torch::full({batch_size, HIDDEN_DIM}, 0, options);
-    half* o_ptr = reinterpret_cast<half*>(o.data_ptr<at::Half>());
-    half* residual_output_ptr = reinterpret_cast<half*>(residual_output.data_ptr<at::Half>());
+    cudaStream_t stream = c10::cuda::getCurrentCUDAStream().stream();
 
-    // 验证连续性
-    assert(o.is_contiguous());
+    uint32_t batch_size = input.size(0);
+    half* o_ptr = reinterpret_cast<half*>(output.data_ptr<at::Half>());
+    half* residual_output_ptr = reinterpret_cast<half*>(residual_output.data_ptr<at::Half>());
 
     half* input_ptr = reinterpret_cast<half*>(input.data_ptr<at::Half>());
     half* residual_ptr = reinterpret_cast<half*>(residual.data_ptr<at::Half>());
     half* weight_qkv_ptr = reinterpret_cast<half*>(weight_qkv.data_ptr<at::Half>());
     half* weight_o_ptr = reinterpret_cast<half*>(weight_o.data_ptr<at::Half>());
-    half* k_cache_ptr = reinterpret_cast<half*>(k_cache.data_ptr<at::Half>());
-    half* v_cache_ptr = reinterpret_cast<half*>(v_cache.data_ptr<at::Half>());
+    uint64_t* k_cache_ptrs_array = reinterpret_cast<uint64_t*>(k_cache_ptrs.data_ptr<uint64_t>());
+    uint64_t* v_cache_ptrs_array = reinterpret_cast<uint64_t*>(v_cache_ptrs.data_ptr<uint64_t>());
     half* rms_input_weight_ptr = reinterpret_cast<half*>(rms_input_weight.data_ptr<at::Half>());
-    float* cos_ptr = reinterpret_cast<float*>(cos.data_ptr<float>());
-    float* sin_ptr = reinterpret_cast<float*>(sin.data_ptr<float>());
+    int64_t* positions_ptr = reinterpret_cast<int64_t*>(positions.data_ptr<int64_t>());
+    float* cos_sin_ptr = reinterpret_cast<float*>(cos_sin.data_ptr<float>());
     int* paged_kv_indptr_ptr = reinterpret_cast<int*>(paged_kv_indptr.data_ptr<int>());
     int* paged_kv_indices_ptr = reinterpret_cast<int*>(paged_kv_indices.data_ptr<int>());
     
@@ -88,23 +90,23 @@ std::tuple<torch::Tensor, torch::Tensor> llama_decoder_layer_batch_sglang_sm120(
     dim3 grid(HEAD_NUM * CLUSTER_SIZE * batch_size); 
     dim3 block(BLOCK_SIZE);
 
-    cudaDeviceSynchronize();
-    LlamaDecoderLayerBatchDecodeWithPagedKVCacheKernel<<<grid, block, max_shmem_size>>>(
+    LlamaDecoderLayerBatchDecodeWithPagedKVCacheKernel<<<grid, block, max_shmem_size, stream>>>(
         o_ptr,
         input_ptr,
         residual_ptr,
         residual_output_ptr,
         rms_input_weight_ptr,
         eps,
-        cos_ptr,
-        sin_ptr,
-        k_cache_ptr,
-        v_cache_ptr,
+        positions_ptr,
+        cos_sin_ptr,
+        k_cache_ptrs_array,
+        v_cache_ptrs_array,
+        layer_id,
         paged_kv_indptr_ptr,
         paged_kv_indices_ptr,
         tensor_map_weight,
         tensor_map_weight_o
     );
-    cudaDeviceSynchronize();
-    return std::make_tuple(o, residual_output);
+
+    return;
 }
