@@ -1,3 +1,4 @@
+import os
 from setuptools import setup, find_packages
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 import torch
@@ -35,8 +36,22 @@ else:
 
 module_name = "_clusterfusion"
 
+include_dirs = set()
+include_dirs.add(os.path.abspath("include"))
+for s in sources:
+    d = os.path.dirname(s)
+    if d:
+        include_dirs.add(os.path.abspath(d))
+
+include_dirs = list(include_dirs)
+
+nvcc_includes = []
+for d in include_dirs:
+    nvcc_includes.extend(["-I", d])
+
 setup(
     name="clusterfusion",
+    version="0.0.1",
     packages=find_packages(),
     ext_modules=[
         CUDAExtension(
