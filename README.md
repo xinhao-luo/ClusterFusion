@@ -7,7 +7,7 @@
 
 ## Installation
 
-### Requirements
+#### Requirements
 - CUDA 12.4  
 - PyTorch 2.5.1  
 - Python 3.12
