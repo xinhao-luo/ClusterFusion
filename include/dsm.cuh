@@ -18,7 +18,7 @@ enum class Stage {
 };
 
 template <int cluster_size, Stage stage>
-__device__ __forceinline__ void __cluster_dims__(cluster_size, 1, 1) dsm_ring_allreduce(
+__device__ __forceinline__ void __cluster_dims__(cluster_size, 1, 1) cluster_reduce(
     const uint32_t size, const uint32_t tid, const uint32_t tile_size, 
     const uint32_t cluster_block_id, const uint32_t src_addr, const uint32_t dst_addr, 
     uint32_t barrier, uint32_t neighbor_dst_bar, half* src, half* dst

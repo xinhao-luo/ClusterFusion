@@ -102,7 +102,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) DeepSeekDecoderLayerKernel(
     if (tid == 0)
         cluster_local_sum = local_sum;
     cluster.sync();
-    // DSM Ring All-reduce
+    // ClusterReduce
     for (int i = 1; i < cluster.num_blocks() - 1; i++) {
         if (tid == 0) {
             local_sum = cluster_local_sum;
@@ -291,7 +291,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) DeepSeekDecoderLayerKernel(
     size = MLA_HEAD_DIM * 2 * sizeof(half);
     src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_qkv));
     dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(weight));
-    dsm_ring_allreduce<CLUSTER_SIZE, Stage::LINEAR_DEEPSEEK>(
+    cluster_reduce<CLUSTER_SIZE, Stage::LINEAR_DEEPSEEK>(
         size, tid, BLOCK_SIZE * 8, cluster_block_id,  
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, local_qkv, weight);
@@ -391,7 +391,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) DeepSeekDecoderLayerKernel(
     size = 128 * sizeof(half);
     src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(&local_qkv[cluster_block_id * 128]));
     dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(&local_qkv[cluster_block_id * 128]));
-    dsm_ring_allreduce<CLUSTER_SIZE, Stage::QUK_DEEPSEEK>(
+    cluster_reduce<CLUSTER_SIZE, Stage::QUK_DEEPSEEK>(
         size, tid, 0, cluster_block_id,  
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, local_qkv, local_qkv);
@@ -545,7 +545,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) DeepSeekDecoderLayerKernel(
         cluster_local_max = local_max;
     }
     cluster.sync();
-    // DSM Ring All-reduce
+    // ClusterReduce
     for (int i = 1; i < cluster.num_blocks() - 1; i++) {
         if (tid == 0) {
             local_max = cluster_local_max;
@@ -568,7 +568,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) DeepSeekDecoderLayerKernel(
         cluster_local_sum = local_sum;
     }
     cluster.sync();
-    // DSM Ring-All reduce
+    // ClusterReduce
     for (int i = 1; i < cluster.num_blocks() - 1; i++) {
         if (tid == 0) {
             local_sum = cluster_local_sum;
@@ -589,11 +589,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) DeepSeekDecoderLayerKernel(
         *(uint4*)(&local_qkv[tid * NUM_PER_THREAD]) = *(uint4*)(&reg_reduce[0]);
     }
     block.sync();
-    // DSM Ring All-reduce
+    // ClusterReduce
     size = KV_LORA_RANK * sizeof(half);
     src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_qkv));
     dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(weight));
-    dsm_ring_allreduce<CLUSTER_SIZE, Stage::ATTN_DEEPSEEK>(
+    cluster_reduce<CLUSTER_SIZE, Stage::ATTN_DEEPSEEK>(
         size, tid, KV_LORA_RANK, cluster_block_id,  
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, local_qkv, weight);
@@ -639,7 +639,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) DeepSeekDecoderLayerKernel(
     size = NOPE_HEAD_DIM * sizeof(half);
     src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_qkv));
     dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(weight));
-    dsm_ring_allreduce<CLUSTER_SIZE, Stage::ATTN>(
+    cluster_reduce<CLUSTER_SIZE, Stage::ATTN>(
         size, tid, NOPE_HEAD_DIM, cluster_block_id,  
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, local_qkv, weight);

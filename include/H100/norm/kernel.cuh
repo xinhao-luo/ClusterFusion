@@ -55,7 +55,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) RMSNormKernel(
     if (tid == 0)
         cluster_local_sum = local_sum;
     block.sync();
-    // DSM Ring All-reduce
+    // ClusterReduce
     if (tid == 0) {
         int dst_cta = (cluster_block_id + 1) % cluster.num_blocks();
         dst_shmem = cluster.map_shared_rank(&cluster_local_sum, dst_cta);  

@@ -135,7 +135,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     if (tid == 0)
         cluster_local_sum = local_sum;
     cluster.sync();
-    // DSM Ring All-reduce
+    // ClusterReduce
     for (int i = 1; i < cluster.num_blocks() - 1; i++) {
         if (tid == 0) {
             local_sum = cluster_local_sum;
@@ -315,11 +315,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     }
 #endif
 
-    // DSM Ring All-reduce
+    // ClusterReduce
     size = (HEAD_DIM * 3) * sizeof(half);
     src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(local_qkv));
     dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(weight));
-    dsm_ring_allreduce<CLUSTER_SIZE, Stage::LINEAR>(
+    cluster_reduce<CLUSTER_SIZE, Stage::LINEAR>(
         size, tid, HEAD_DIM, cluster_block_id,  
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, local_qkv, weight);
@@ -618,7 +618,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         cluster_local_max = local_max;
     }
     cluster.sync();
-    // DSM Ring All-reduce: local_max
+    // ClusterReduce: local_max
 #ifdef DEBUG
     // DEBUG PRINT
     if (tid == 0 && (head_id == PRINT_HEAD) && cluster_block_id == 0) {
@@ -651,7 +651,7 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
         cluster_local_sum = local_sum;
     }
     cluster.sync();
-    // DSM Ring-All reduce: local_sum
+    // ClusterReduce: local_sum
 #ifdef DEBUG
     // DEBUG PRINT
     if (tid == 0 && (head_id == PRINT_HEAD) && cluster_block_id == 0) {
@@ -706,11 +706,11 @@ __global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1) LlamaDecoderLayerKernel(
     }
 #endif
 
-    // DSM Ring-All reduce
+    // ClusterReduce
     size = HEAD_DIM * sizeof(half);
     src_addr = static_cast<uint32_t>(__cvta_generic_to_shared(&local_qkv[2 * HEAD_DIM]));
     dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(weight));
-    dsm_ring_allreduce<CLUSTER_SIZE, Stage::ATTN>(
+    cluster_reduce<CLUSTER_SIZE, Stage::ATTN>(
         size, tid, HEAD_DIM, cluster_block_id,  
         src_addr, dst_addr, bar_ptr, 
         neighbor_dst_bar, &local_qkv[2 * HEAD_DIM], weight);
