@@ -2,6 +2,7 @@ build/
 clusterfusion.egg-info/
 dist/
 *.DS_Store
+*.so
 __pycache__/
 workspace/test
 workspace/5090/test
