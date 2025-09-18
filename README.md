@@ -26,7 +26,7 @@ pip install -e .
 
 We provide following script to run ClusterFusion.
 ```
-USE_CLUSTER_FUSION=true torchrun --nproc_per_node 1 tests/text_completion_llama.py \
+USE_CLUSTER_FUSION=true torchrun --nproc_per_node 1 chat/chat.py \
 	--ckpt_dir /PATH/TO/llama2-7b \
 	--tokenizer_path /PATH/TO/llama2-7b-tokenizer \
 	--max_seq_len 1024 --max_batch_size 1 \
