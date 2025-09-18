@@ -1,5 +1,5 @@
-MODEL_PATH=/mnt/model/llama-2-7b
-TOKENIZER_PATH=/mnt/model/llama-2-7b-hf/tokenizer.model
+MODEL_PATH=/cephfs/shared/model/llama-2-7b-chat
+TOKENIZER_PATH=/cephfs/shared/model/llama-2-7b-hf/tokenizer.model
 
 ref:
 	torchrun --nproc_per_node 1 chat.py \

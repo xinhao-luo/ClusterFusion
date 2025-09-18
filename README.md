@@ -36,9 +36,36 @@ USE_CLUSTER_FUSION=true torchrun --nproc_per_node 1 chat/chat.py \
 
 #### E2E
 
+```python
+from clusterfusion import lama_decoder_layer
+
+llama_decoder_layer(
+	output,
+	residual_output,
+	hidden_states,
+	residual,
+	qkv_weight,
+	o_weight,
+	paged_kv_indptr_buf,
+	paged_kv_indices_buf,
+	k_data_ptrs,
+	v_data_ptrs,
+	layer_id,
+	rms_weight,
+	eps,
+	positions,
+	cos_sin
+)
+
+```
 
 #### Primitives
 ![overview](assets/cluster.png)
-We construct ``cluster_reduce`` 
+```cuda
+cluster_reduce<CLUSTER_SIZE, Stage::LINEAR>(
+        size, tid, HEAD_DIM, cluster_block_id,  
+        src_addr, dst_addr, bar_ptr, 
+        neighbor_dst_bar, local_qkv, weight);
+```
 
 ## TODO

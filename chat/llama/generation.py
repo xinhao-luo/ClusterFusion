@@ -118,7 +118,7 @@ class Llama:
         torch.set_default_tensor_type(torch.cuda.HalfTensor)
         model = Transformer(model_args)
         model.load_state_dict(checkpoint, strict=False)
-        print(f"Loaded in {time.time() - start_time:.2f} seconds")
+        # print(f"Loaded in {time.time() - start_time:.2f} seconds")
 
         return Llama(model, tokenizer)
 
@@ -229,6 +229,47 @@ class Llama:
             out_tokens.append(toks)
             out_logprobs.append(probs)
         return (out_tokens, out_logprobs if logprobs else None)
+    
+    @torch.inference_mode()
+    def stream_generate(
+        self,
+        prompt_tokens: List[List[int]],
+        max_gen_len: int,
+        temperature: float = 0.6,
+        top_p: float = 0.9,
+        echo: bool = False,
+    ):
+        bsz = len(prompt_tokens)
+        pad_id = self.tokenizer.pad_id
+        max_prompt_len = max(len(t) for t in prompt_tokens)
+        total_len = min(self.model.params.max_seq_len, max_prompt_len + max_gen_len)
+
+        tokens = torch.full((bsz, total_len), pad_id, device="cuda", dtype=torch.long)
+        for i, t in enumerate(prompt_tokens):
+            tokens[i, :len(t)] = torch.tensor(t, device="cuda")
+
+        eos_reached = torch.zeros(bsz, dtype=torch.bool, device="cuda")
+        prev_pos = 0
+
+        for cur_pos in range(max_prompt_len, total_len):
+            logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            if temperature > 0:
+                probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
+                next_token = sample_top_p(probs, top_p).squeeze(-1)
+            else:
+                next_token = torch.argmax(logits[:, -1], dim=-1)
+
+            mask_gen = tokens[:, cur_pos] == pad_id
+            tokens[:, cur_pos] = torch.where(mask_gen, next_token, tokens[:, cur_pos])
+
+            eos_reached |= (tokens[:, cur_pos] == self.tokenizer.eos_id)
+
+            yield [tokens[i, cur_pos].item() for i in range(bsz)]
+
+            prev_pos = cur_pos
+            if eos_reached.all():
+                break
+
 
     def text_completion(
         self,
@@ -419,3 +460,17 @@ def sample_top_p(probs, p):
     next_token = torch.multinomial(probs_sort, num_samples=1)
     next_token = torch.gather(probs_idx, -1, next_token)
     return next_token
+
+def sample_top_p_stream(probs: torch.Tensor, top_p: float) -> torch.Tensor:
+    """
+    Nucleus sampling (top-p) for one step.
+    """
+    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+    mask = cumulative_probs > top_p
+    mask[..., 1:] = mask[..., :-1].clone()
+    mask[..., 0] = 0
+    sorted_probs[mask] = 0
+    sorted_probs /= sorted_probs.sum(dim=-1, keepdim=True)
+    next_token = torch.multinomial(sorted_probs, num_samples=1).squeeze(-1)
+    return sorted_indices.gather(-1, next_token.unsqueeze(-1)).squeeze(-1)

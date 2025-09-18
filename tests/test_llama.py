@@ -10,7 +10,6 @@ num_heads = 32
 seqlen = 4096
 head_dim = hidden_size // num_heads
 ffn_dim_gt = 11008  
-ffn_dim_fuse = 12288    
 
 torch.manual_seed(42)
 
@@ -45,7 +44,6 @@ def apply_neox_style_rotary_pos_emb(q, k, cos, sin):
 
 # from llama/model.py
 def rotate_every_two(x):
-    # 相邻两维成对旋转，匹配 view_as_complex(..., 2) 的语义
     x_even = x[..., ::2]
     x_odd  = x[..., 1::2]
     return torch.stack((-x_odd, x_even), dim=-1).reshape_as(x)
@@ -130,14 +128,6 @@ def test_llama_decode_e2e():
     gate_up_proj_weight_gt = generate_random_weights((2 * hidden_size, ffn_dim_gt)).to(0).half()
     down_proj_weight_gt = generate_random_weights((ffn_dim_gt, hidden_size)).to(0).half()
     
-    # For single_decode_layer
-    gate_up_proj_weight_fuse = torch.zeros((2 * hidden_size, ffn_dim_fuse), dtype=torch.float16, device="cuda")
-    down_proj_weight_fuse = torch.zeros((ffn_dim_fuse, hidden_size), dtype=torch.float16, device="cuda")
-    
-    # Copy the first 11008 dimensions from llama_decode to single_decode_layer
-    gate_up_proj_weight_fuse[:, :ffn_dim_gt] = gate_up_proj_weight_gt
-    down_proj_weight_fuse[:ffn_dim_gt, :] = down_proj_weight_gt
-    
     rms_input_weight = generate_random_weights((1, hidden_size)).to(0).half()
     rms_attn_weight = generate_random_weights((1, hidden_size)).to(0).half()
 
@@ -152,7 +142,7 @@ def test_llama_decode_e2e():
     o = []
     for i in range(test_run):
         tmp_residual = residual.clone()
-        output, _, k, v = clusterfusion.llama_decoder_layer_batch_decode_sglang(
+        output, _, k, v = clusterfusion.llama_decoder_layer_sglang(
             input_tensor,          
             tmp_residual,
             weight_qkv,                          

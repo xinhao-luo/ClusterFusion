@@ -1,11 +1,9 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
-
+# chat.py
 import fire
-
-from llama import Llama
-from typing import List
 import time
+from typing import List
+from llama import Llama
+import torch
 
 def main(
     ckpt_dir: str,
@@ -13,64 +11,57 @@ def main(
     temperature: float = 0.6,
     top_p: float = 0.9,
     max_seq_len: int = 512,
-    max_gen_len: int = 256,
+    max_gen_len: int = 128,
     max_batch_size: int = 4,
 ):
-    """
-    Entry point of the program for generating text using a pretrained model.
-
-    Args:
-        ckpt_dir (str): The directory containing checkpoint files for the pretrained model.
-        tokenizer_path (str): The path to the tokenizer model used for text encoding/decoding.
-        temperature (float, optional): The temperature value for controlling randomness in generation.
-            Defaults to 0.6.
-        top_p (float, optional): The top-p sampling parameter for controlling diversity in generation.
-            Defaults to 0.9.
-        max_seq_len (int, optional): The maximum sequence length for input prompts. Defaults to 128.
-        max_gen_len (int, optional): The maximum length of generated sequences. Defaults to 64.
-        max_batch_size (int, optional): The maximum batch size for generating sequences. Defaults to 4.
-    """ 
     generator = Llama.build(
         ckpt_dir=ckpt_dir,
         tokenizer_path=tokenizer_path,
         max_seq_len=max_seq_len,
         max_batch_size=max_batch_size,
     )
+    sys.stdout = old_stdout
+    prompts: List[str] = ["I believe the meaning of life is"]
+    prompt_tokens_list = [generator.tokenizer.encode(p, bos=True, eos=False) for p in prompts]
 
-    prompts: List[str] = [
-        # For these prompts, the expected answer is the natural continuation of the prompt
-        "I believe the meaning of life is",
-    ]
+    print("prompt:", prompts[0])
+    print("response: ", end="", flush=True)
+
     start_time = time.perf_counter()
-    results = generator.text_completion(
-        prompts,
-        max_gen_len=max_gen_len,
-        temperature=temperature,
-        top_p=top_p,
-    )
+    buffer_tokens = []
+    token_str_prev = ""
+    for token_ids in generator.stream_generate(prompt_tokens_list, max_gen_len, temperature, top_p):
+        buffer_tokens.append(token_ids[0])
+        token_str = generator.tokenizer.decode(buffer_tokens)
+        new_text = token_str[len(token_str_prev):]
+        print(new_text, end="", flush=True)
+        token_str_prev = token_str
+
+
     end_time = time.perf_counter()
+
     total_time = end_time - start_time
-
-    total_tokens = 0
-    for result in results:
-        # For text_completion, the result format is {'generation': '...'}
-        generated_text = result['generation']
-        tokens = generator.tokenizer.encode(generated_text, bos=False, eos=False)
-        total_tokens += len(tokens)
-
+    total_tokens = sum(len(generator.tokenizer.encode(p, bos=False, eos=False)) for p in prompts) + max_gen_len
     tokens_per_second = total_tokens / total_time if total_time > 0 else 0
 
-    for prompt, result in zip(prompts, results):
-        print(prompt)
-        print(f"> {result['generation']}")
-        print("\n==================================\n")
-
-    print(f"\n{'='*50}")
-    print(f"Total completion time: {total_time:.3f} seconds")
-    print(f"Total generated tokens: {total_tokens}")
-    print(f"Tokens per second: {tokens_per_second:.2f}")
-    print(f"{'='*50}\n")
-
+    print("\n" + "="*50)
+    print(f"Total completion time: {total_time:.3f}s")
+    print(f"Total tokens: {total_tokens}")
+    print(f"Tokens/sec: {tokens_per_second:.2f}")
 
 if __name__ == "__main__":
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning)
+    import sys
+
+    class DummyFile:
+        def write(self, x): pass
+        def flush(self): pass
+
+    # 屏蔽 stdout
+    old_stdout = sys.stdout
+    sys.stdout = DummyFile()
+
     fire.Fire(main)
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()

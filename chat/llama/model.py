@@ -17,6 +17,7 @@ from torch import nn
 import os
 
 from clusterfusion import llama_decoder_layer
+import flashinfer
 
 @dataclass
 class ModelArgs:
@@ -251,11 +252,21 @@ class Attention(nn.Module):
         ).cuda()
 
         def original_attention(q, k, v, mask):
-            scores = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
-            if mask is not None:
-                scores = scores + mask
-            scores = F.softmax(scores.float(), dim=-1).type_as(q)
-            return torch.matmul(scores, v)
+            if q.size(2) > 1:
+                scores = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
+                if mask is not None:
+                    scores = scores + mask
+                scores = F.softmax(scores.float(), dim=-1).type_as(q)
+                return torch.matmul(scores, v)
+            else:
+                q = q.squeeze(0).squeeze(1)
+                k = k.squeeze(0).permute(1, 0, 2)
+                v = v.squeeze(0).permute(1, 0, 2)
+                o = flashinfer.single_decode_with_kv_cache(
+                    q, k, v, "NHD", "NONE", use_tensor_cores=False
+                )
+                return o.unsqueeze(0).unsqueeze(2)
+            
 
         self.attention_kernel = original_attention
 
@@ -389,7 +400,7 @@ class Attention(nn.Module):
             values = values.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
 
             output = self.attention_kernel(xq, keys, values, mask)
-
+            # print(output.shape)
             output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
             output = self.wo(output)
             return output

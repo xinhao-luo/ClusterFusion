@@ -28,6 +28,8 @@ elif _arch == "sm90a":
     sources = [
         "include/pybind.cpp",
         "include/H100/llama/llama_kernel_dispatch.cu",
+        "include/H100/llama/llama_kernel_sglang_dispatch.cu",
+        "include/H100/llama/llama_kernel_batch_sglang_dispatch.cu",
         "include/H100/deepseek/deepseek_kernel_dispatch.cu",
         "include/H100/norm/norm_kernel_dispatch.cu",
     ]
