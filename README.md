@@ -3,7 +3,12 @@
 
 ![overview](assets/overview.png)
 
+* ClusterFusion with Llama-2-7B on H100 GPU:
+![](assets/example.gif)
+
+
 ## News
+- [2025/09] 🔥 ClusterFusion has been accepted to **NeurIPS 2025**!
 
 ## Installation
 
@@ -68,4 +73,3 @@ cluster_reduce<CLUSTER_SIZE, Stage::LINEAR>(
         neighbor_dst_bar, local_qkv, weight);
 ```
 
-## TODO
