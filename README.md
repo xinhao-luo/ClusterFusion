@@ -4,6 +4,7 @@
 ![overview](assets/overview.png)
 
 * ClusterFusion with Llama-2-7B on H100 GPU:
+
 ![](assets/example.gif)
 
 
