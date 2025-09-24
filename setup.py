@@ -1,7 +1,6 @@
 from setuptools import setup, find_packages
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 import torch
-import os
 
 def _get_arch():
     if not torch.cuda.is_available():
