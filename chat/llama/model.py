@@ -278,7 +278,6 @@ class Attention(nn.Module):
             freqs_cis = precompute_freqs_cis(head_dim, args.max_seq_len * 2)  # (L, head_dim/2)
             cos = torch.repeat_interleave(freqs_cis.real, 2, dim=-1)  # (L, head_dim)
             sin = torch.repeat_interleave(freqs_cis.imag, 2, dim=-1)  # (L, head_dim)
-            # 注册为 buffer，随模型迁移设备/精度，不写入 checkpoint
             self.register_buffer("rotary_cos", cos, persistent=False)
             self.register_buffer("rotary_sin", sin, persistent=False)
             self.weight_qkv = None
@@ -335,7 +334,7 @@ class Attention(nn.Module):
         start_pos: int,
         freqs_cis: torch.Tensor,
         mask: Optional[torch.Tensor],
-        rms_input_weight: torch.Tensor,  # 新增参数
+        rms_input_weight: torch.Tensor,  
     ):
         """
         Forward pass of the attention module.

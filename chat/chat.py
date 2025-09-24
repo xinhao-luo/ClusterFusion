@@ -58,7 +58,6 @@ if __name__ == "__main__":
         def write(self, x): pass
         def flush(self): pass
 
-    # 屏蔽 stdout
     old_stdout = sys.stdout
     sys.stdout = DummyFile()
 
