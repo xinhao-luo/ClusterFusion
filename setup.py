@@ -1,6 +1,7 @@
 from setuptools import setup, find_packages
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 import torch
+import os
 
 def _get_arch():
     if not torch.cuda.is_available():
@@ -41,11 +42,12 @@ module_name = "_clusterfusion"
 
 setup(
     name="clusterfusion",
+    version="0.0.0",
     packages=find_packages(),
     ext_modules=[
         CUDAExtension(
             name="clusterfusion._clusterfusion",
-            sources=sources,
+            sources=sources,       
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17", f"-D{_macro}"],
                 "nvcc": [
@@ -61,4 +63,10 @@ setup(
     ],
     cmdclass={"build_ext": BuildExtension},
     install_requires=["torch"],
+    classifiers=[
+        "Development Status :: 3 - Alpha",
+        "Intended Audience :: Science/Research",
+        "Topic :: Scientific/Engineering :: Artificial Intelligence",
+        "Programming Language :: Python :: 3.12",
+    ],
 )

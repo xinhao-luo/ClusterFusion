@@ -13,9 +13,19 @@
 
 ## Installation
 
-#### Requirements
+### Requirements
 - CUDA 12.4  
 - PyTorch 2.5.1  
+
+### Install from PIP
+
+You can install ClusterFusion with the following command:
+
+```bash
+pip install clusterfusion
+```
+
+### Install from Source
 
 1. Clone this repository and navigate to ClusterFusion folder:
 ```
@@ -23,7 +33,7 @@ git clone https://github.com/xinhao-luo/ClusterFusion.git
 cd clusterfusion
 ```
 
-1. Install ClusterFusion kernels:
+2. Install ClusterFusion kernels:
 ```
 pip install -e .
 ```
@@ -74,3 +84,18 @@ cluster_reduce<CLUSTER_SIZE, Stage::LINEAR>(
         neighbor_dst_bar, local_qkv, weight);
 ```
 
+## Citation
+
+If you find ClusterFusion useful in your research or project, please kindly cite our paper:
+
+```
+@misc{luo2025clusterfusion,
+      title={ClusterFusion: Expanding Operator Fusion Scope for LLM Inference via Cluster-Level Collective Primitive}, 
+      author={Xinhao Luo and Zihan Liu and Yangjie Zhou and Shihan Fang and Ziyu Huang and Yu Feng and Chen Zhang and Shixuan Sun and Zhenzhe Zheng and Jingwen Leng and Minyi Guo},
+      year={2025},
+      eprint={2508.18850},
+      archivePrefix={arXiv},
+      primaryClass={cs.DC},
+      url={https://arxiv.org/abs/2508.18850}, 
+}
+```
